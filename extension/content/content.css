@@ -1,0 +1,309 @@
+.ldub-overlay {
+  position: fixed;
+  z-index: 999999;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: #f5f5f7;
+  --ldub-accent: #e11d48;
+  --ldub-accent-dark: #be123c;
+  --ldub-bg: rgba(20, 20, 24, .94);
+  --ldub-border: rgba(255, 255, 255, .09);
+}
+
+/* Nút không còn nằm bên trong .ldub-overlay (có thể bị chuyển hẳn vào thanh
+   điều khiển của Coursera — xem tryDockToControlBar trong content.js), nên
+   không dựa vào biến kế thừa từ .ldub-overlay nữa — khai báo riêng ở :root,
+   an toàn vì content.css chỉ nạp trên trang Coursera. */
+:root {
+  --ldub-accent: #e11d48;
+  --ldub-accent-dark: #be123c;
+  --ldub-bg: rgba(20, 20, 24, .94);
+}
+
+/* Chỉ icon — trước đây là pill có chữ, chiếm nhiều chỗ trên video. Chữ vẫn
+   còn trong DOM (.ldub-btn-text, xem setBtnLabel trong content.js) để đọc
+   được bằng screen reader và hiện thành tooltip (title) khi rê chuột, chỉ
+   ẩn khỏi mắt bằng kỹ thuật "sr-only" bên dưới. */
+.ldub-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  background: linear-gradient(135deg, var(--ldub-accent), var(--ldub-accent-dark));
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .4), 0 0 0 1px rgba(255, 255, 255, .06) inset;
+  transition: transform .15s ease, box-shadow .15s ease, background .2s ease;
+  z-index: 999999;
+}
+.ldub-btn.ldub-btn-floating { position: fixed; }
+/* Gắn trong thanh điều khiển thật — thu nhỏ hơn để vừa hàng icon gốc của
+   Coursera (thường ~28px), bỏ box-shadow nổi (không cần khi đã có nền tối
+   chung của thanh điều khiển làm nền). */
+.ldub-btn.ldub-btn-docked {
+  width: 28px;
+  height: 28px;
+  margin: 0 2px;
+  box-shadow: none;
+}
+.ldub-btn:hover { transform: scale(1.06); box-shadow: 0 5px 16px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .08) inset; }
+.ldub-btn.ldub-btn-docked:hover { box-shadow: none; }
+.ldub-btn:active { transform: scale(.96); }
+.ldub-icon { width: 16px; height: 16px; flex-shrink: 0; }
+.ldub-btn-docked .ldub-icon { width: 14px; height: 14px; }
+.ldub-btn-text {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.ldub-btn.ldub-btn-active {
+  background: linear-gradient(135deg, #1f2126, #17181c);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .4), 0 0 0 1px rgba(255, 255, 255, .1) inset;
+}
+.ldub-btn.ldub-btn-active::after {
+  content: "";
+  position: absolute;
+  top: -2px; right: -2px;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #2ed573;
+  box-shadow: 0 0 6px #2ed573, 0 0 0 2px var(--ldub-bg);
+}
+
+.ldub-panel, .ldub-controls {
+  background: var(--ldub-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--ldub-border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  width: 270px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+  animation: ldub-pop .16s ease;
+}
+@keyframes ldub-pop {
+  /* Panel mở LÊN từ nút (vị trí tính trong positionOverlay(), content.js) —
+     trượt từ dưới lên. */
+  from { opacity: 0; transform: translateY(4px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.ldub-panel-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 10px;
+  letter-spacing: .01em;
+}
+.ldub-progress {
+  background: rgba(255, 255, 255, .1);
+  border-radius: 999px;
+  height: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.ldub-progress-bar {
+  background: linear-gradient(90deg, var(--ldub-accent), #ff6b81);
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  transition: width .3s cubic-bezier(.4, 0, .2, 1);
+}
+.ldub-note { font-size: 12px; color: #b8b8bd; line-height: 1.5; }
+
+/* Segmented control (Gốc / Thuyết minh) */
+.ldub-seg {
+  display: flex;
+  background: rgba(255, 255, 255, .06);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+  margin-bottom: 12px;
+}
+.ldub-seg-opt {
+  flex: 1;
+  text-align: center;
+  position: relative;
+  cursor: pointer;
+}
+.ldub-seg-opt input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.ldub-seg-opt span {
+  display: block;
+  padding: 6px 4px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #a3a3a9;
+  transition: background .15s ease, color .15s ease;
+}
+.ldub-seg-opt input:checked + span {
+  background: var(--ldub-accent);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(255, 71, 87, .4);
+}
+.ldub-seg-opt:hover input:not(:checked) + span { color: #e5e5e8; }
+
+/* Hàng thông tin chung (label bên trái, control bên phải) */
+.ldub-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+  color: #d4d4d8;
+}
+/* Khối label-trên/control-dưới — dùng cho "Giọng đọc": tên giọng dài (vd
+   "Google (giọng máy, qua mạng — không chọn được nam/nữ)") không đủ chỗ
+   trên cùng một hàng với label như .ldub-row, cần cả bề ngang của panel. */
+.ldub-block { margin-bottom: 10px; }
+.ldub-row:last-child, .ldub-block:last-child { margin-bottom: 0; }
+.ldub-block-label { font-size: 12.5px; color: #d4d4d8; margin-bottom: 7px; }
+
+/* Switch (phụ đề bật/tắt) */
+.ldub-switch { position: relative; display: inline-block; width: 34px; height: 20px; flex-shrink: 0; }
+.ldub-switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }
+.ldub-switch-track {
+  position: absolute; inset: 0;
+  background: rgba(255, 255, 255, .18);
+  border-radius: 999px;
+  transition: background .15s ease;
+}
+.ldub-switch-track::before {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .4);
+  transition: transform .15s ease;
+}
+.ldub-switch input:checked ~ .ldub-switch-track { background: var(--ldub-accent); }
+.ldub-switch input:checked ~ .ldub-switch-track::before { transform: translateX(14px); }
+
+.ldub-voice-pick { display: flex; align-items: center; gap: 6px; width: 100%; }
+
+.ldub-voice {
+  background: rgba(255, 255, 255, .07);
+  color: #f5f5f7;
+  border: 1px solid var(--ldub-border);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  /* Chiếm hết bề ngang còn lại (panel 270px, đã trừ nút nghe thử) thay vì
+     bó cứng 130px — tên giọng dài (gTTS: "Google (giọng máy, qua mạng —
+     không chọn được nam/nữ)") trước đây bị cắt cụt giữa chừng. */
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ldub-voice:disabled { opacity: .55; cursor: default; }
+.ldub-voice:focus { outline: 2px solid var(--ldub-accent); outline-offset: 1px; }
+
+.ldub-preview-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px; height: 24px;
+  border: 1px solid var(--ldub-border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .07);
+  color: #f5f5f7;
+  cursor: pointer;
+  transition: background .12s ease, transform .1s ease;
+}
+.ldub-preview-btn .ldub-icon { width: 11px; height: 11px; }
+.ldub-preview-btn:hover:not(:disabled) { background: var(--ldub-accent); }
+.ldub-preview-btn:active:not(:disabled) { transform: scale(.92); }
+.ldub-preview-btn:disabled { opacity: .5; cursor: default; }
+
+.ldub-hint {
+  font-size: 11px;
+  color: #85858c;
+  line-height: 1.45;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ldub-border);
+}
+
+/*
+ * Phụ đề — mặc định theo chuẩn ngành (Netflix/BBC): chữ trắng trên nền đen
+ * bán trong suốt, tương phản trắng/đen ~21:1 (vượt xa tối thiểu WCAG AA
+ * 4.5:1), rộng tối đa 85% khung hình (khớp khuyến nghị 80-85%), tránh sát
+ * viền dưới ("safe area"). Cỡ chữ đặt bằng inline style từ JS (% chiều cao
+ * video, xem SUBTITLE_SIZE_PCT trong content.js) — không cố định px vì
+ * video Coursera đổi kích thước tuỳ layout trang.
+ */
+.ldub-subtitle {
+  position: fixed;
+  z-index: 999998;
+  text-align: center;
+  pointer-events: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.ldub-subtitle:not([hidden]) {
+  display: block;
+  animation: ldub-fade .12s ease;
+}
+.ldub-sub-box {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  max-width: 85%;
+  padding: 6px 16px;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+  /* .ldub-subtitle (cha) để pointer-events:none cho toàn vùng còn lại của
+     video vẫn bấm/kéo thanh tua được bình thường — chỉ riêng cái hộp chữ
+     này mới nhận sự kiện, để kéo đi chỗ khác nếu preset Trên/Dưới không hợp
+     skin trình phát cụ thể. touch-action:none để kéo mượt trên màn cảm ứng. */
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.ldub-subtitle.ldub-dragging .ldub-sub-box { cursor: grabbing; opacity: .88; }
+.ldub-sub-line {
+  display: inline-block;
+  font-weight: 600;
+  line-height: 1.35;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+}
+/* Tiếng Anh (gốc, phụ) — nhỏ hơn dòng Việt một chút, hơi mờ để mắt ưu tiên
+   đọc dòng Việt trước; vẫn đủ tương phản để đọc được, không phải trang trí. */
+.ldub-sub-en { font-size: .78em; opacity: .82; font-weight: 500; }
+.ldub-sub-vi { font-size: 1em; }
+
+/* 3 preset màu — đúng 3 trong 4 lựa chọn thật của Netflix (bỏ "trắng không
+   nền" vì trên nhiều khung hình sáng sẽ mất chữ, không phù hợp mặc định). */
+.ldub-subtitle[data-color="white-black"] .ldub-sub-box { background: rgba(10, 10, 12, .78); }
+.ldub-subtitle[data-color="white-black"] .ldub-sub-line { color: #fff; }
+.ldub-subtitle[data-color="yellow-black"] .ldub-sub-box { background: rgba(10, 10, 12, .78); }
+.ldub-subtitle[data-color="yellow-black"] .ldub-sub-line { color: #ffd60a; }
+.ldub-subtitle[data-color="black-white"] .ldub-sub-box { background: rgba(255, 255, 255, .92); }
+.ldub-subtitle[data-color="black-white"] .ldub-sub-line { color: #0a0a0c; text-shadow: none; }
+@keyframes ldub-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

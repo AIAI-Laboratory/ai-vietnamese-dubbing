@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Cài đặt — Local AI Vietnamese Dubbing</title>
+<!-- External, không inline — CSP mặc định của MV3 (script-src 'self') chặn
+     mọi <script> viết thẳng trong HTML, dù cùng gói extension. -->
+<script src="../lib/theme.js"></script>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <!-- Sprite icon — nguồn Lucide (MIT, github.com/lucide-icons/lucide), lấy nguyên path gốc,
+       không tự vẽ lại. Dùng <use> để không lặp markup mỗi chỗ gọi. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/>
+      </symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>
+      </symbol>
+      <symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>
+      </symbol>
+      <symbol id="i-volume" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>
+      </symbol>
+      <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 6 9 17l-5-5"/>
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>
+      </symbol>
+      <symbol id="i-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+      </symbol>
+      <symbol id="i-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon"><svg class="icon"><use href="#i-mic"/></svg></div>
+        <div class="brand-text">
+          <strong>Local AI Vietnamese Dubbing</strong>
+          <span>Thuyết minh tiếng Việt cho Coursera</span>
+        </div>
+      </div>
+
+      <nav class="nav" id="tabNav">
+        <button type="button" class="nav-item active" data-tab="tab-translate">
+          <svg class="icon"><use href="#i-globe"/></svg>
+          <span>Dịch</span>
+          <small>API EN → VI</small>
+        </button>
+        <button type="button" class="nav-item" data-tab="tab-voice">
+          <svg class="icon"><use href="#i-server"/></svg>
+          <span>Giọng đọc</span>
+          <small>TTS server</small>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="theme-switch" id="themeSwitch" role="group" aria-label="Giao diện">
+          <button type="button" data-theme-choice="light" title="Sáng" aria-label="Giao diện sáng"><svg class="icon"><use href="#i-sun"/></svg></button>
+          <button type="button" data-theme-choice="dark" title="Tối" aria-label="Giao diện tối"><svg class="icon"><use href="#i-moon"/></svg></button>
+          <button type="button" data-theme-choice="system" title="Theo hệ thống" aria-label="Giao diện theo hệ thống"><svg class="icon"><use href="#i-monitor"/></svg></button>
+        </div>
+        <p class="sidebar-hint">
+          Âm lượng, phụ đề và cache chỉnh trong <b>popup icon extension</b> trên toolbar —
+          trang này chỉ cấu hình API dịch và giọng đọc.
+        </p>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="content-head">
+        <div>
+          <h1 id="contentTitle">Dịch</h1>
+          <p id="contentSub" class="content-sub">Tương thích OpenAI — dùng được với OpenAI, Gemini, Groq hoặc endpoint riêng của bạn.</p>
+        </div>
+        <div class="content-head-actions">
+          <span id="saveStatus" class="status status-inline"></span>
+          <button id="btnSave" type="button" class="btn btn-primary">
+            <svg class="icon"><use href="#i-check"/></svg>Lưu cài đặt
+          </button>
+        </div>
+      </header>
+
+      <section id="tab-translate" class="tab-panel active">
+        <div class="card">
+          <div class="card-head"><svg class="icon"><use href="#i-key"/></svg><h2>Kết nối</h2></div>
+          <div class="field-grid">
+            <div class="field">
+              <label for="apiBaseUrl">Base URL</label>
+              <input type="text" id="apiBaseUrl" placeholder="https://api.openai.com/v1">
+            </div>
+            <div class="field">
+              <label for="apiKey">API key</label>
+              <input type="password" id="apiKey" placeholder="sk-...">
+            </div>
+          </div>
+          <div class="field">
+            <label for="model">Model</label>
+            <div class="field-row">
+              <input type="text" id="model" placeholder="vd: gpt-4o-mini, gemini-2.5-flash...">
+              <select id="modelList"><option value="">— danh sách đã tải —</option></select>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button id="btnLoadModels" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-download"/></svg>Tải danh sách model</button>
+            <button id="btnTestModel" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-check"/></svg>Kiểm tra model</button>
+          </div>
+          <div id="apiStatus" class="status"></div>
+        </div>
+
+      </section>
+
+      <section id="tab-voice" class="tab-panel">
+        <p class="tab-note">Server chạy trên máy bạn, audio/video không rời khỏi máy. Engine gTTS gửi văn bản đã dịch lên mạng để đọc —
+          xem cảnh báo trong <code>server/README.md</code> mục "gTTS". File đó có hướng dẫn chạy server (Python, xem <code>server/README.md</code>).</p>
+
+        <div class="card">
+          <div class="card-head"><svg class="icon"><use href="#i-server"/></svg><h2>Server</h2></div>
+          <div class="field">
+            <label for="serverUrl">Server URL</label>
+            <div class="field-row">
+              <input type="text" id="serverUrl" placeholder="http://127.0.0.1:18765">
+              <button id="btnCheckServer" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-refresh"/></svg>Kiểm tra</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="serverApiKey">API key (bắt buộc — đúng giá trị API_KEY trong server/.env)</label>
+            <input type="password" id="serverApiKey" placeholder="Dán API key của server vào đây">
+          </div>
+          <div id="serverStatus" class="status status-lg"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><svg class="icon"><use href="#i-volume"/></svg><h2>Giọng</h2></div>
+          <div class="field">
+            <label for="voice">Giọng đọc</label>
+            <div class="field-row">
+              <select id="voice"><option value="">— bấm "Tải danh sách" —</option></select>
+              <button id="btnLoadVoices" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-download"/></svg>Tải danh sách</button>
+              <button id="btnPreviewVoice" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-play"/></svg>Nghe thử</button>
+            </div>
+          </div>
+          <div id="previewStatus" class="status"></div>
+          <audio id="previewAudio" hidden></audio>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><svg class="icon"><use href="#i-gauge"/></svg><h2>Đồng bộ</h2></div>
+          <div class="field field-compact">
+            <label for="viSyllablesPerSec">Âm tiết / giây</label>
+            <input type="number" id="viSyllablesPerSec" min="1" max="8" step="0.01">
+          </div>
+          <p class="field-hint">
+            Tốc độ đọc tiếng Việt tham chiếu — quyết định câu dịch dài bao nhiêu thì vừa khung hình.
+            Mặc định 3.0 đo được từ gTTS (engine duy nhất đang dùng).
+            Số thật của lần chạy gần nhất nằm ở <code>measuredSyllablesPerSec</code> trong log.
+          </p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

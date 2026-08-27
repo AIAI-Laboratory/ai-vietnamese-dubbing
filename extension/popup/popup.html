@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Local AI Vietnamese Dubbing</title>
+<!-- External, không inline — CSP mặc định của MV3 (script-src 'self') chặn
+     mọi <script> viết thẳng trong HTML, dù cùng gói extension. -->
+<script src="../lib/theme.js"></script>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <span class="header-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/>
+      </svg>
+    </span>
+    Local AI Vietnamese Dubbing
+  </div>
+
+  <div id="status" class="status">Đang kiểm tra...</div>
+
+  <div class="p-section">
+    <div class="p-row"><span>Âm lượng thuyết minh</span><span class="p-val" id="dubVolumeVal"></span></div>
+    <input type="range" id="dubVolume" min="0" max="1" step="0.05" class="slider">
+    <p class="p-hint">Chế độ Thuyết minh sẽ mute hẳn âm video gốc; chọn Gốc trong bảng điều khiển nổi để mở lại.</p>
+  </div>
+
+  <div class="p-section">
+    <label class="switch-row">
+      <span>Phụ đề tiếng Việt</span>
+      <span class="switch"><input type="checkbox" id="subtitlesOn"><span class="switch-track"></span></span>
+    </label>
+    <label class="switch-row">
+      <span>Phụ đề tiếng Anh (gốc)</span>
+      <span class="switch"><input type="checkbox" id="subtitlesEnOn"><span class="switch-track"></span></span>
+    </label>
+
+    <div class="p-field">
+      <label for="subtitlePosition">Vị trí</label>
+      <select id="subtitlePosition">
+        <option value="bottom">Dưới video</option>
+        <option value="top">Trên video</option>
+      </select>
+    </div>
+    <div class="p-field">
+      <label for="subtitleSize">Cỡ chữ</label>
+      <select id="subtitleSize">
+        <option value="small">Nhỏ</option>
+        <option value="medium">Vừa</option>
+        <option value="large">Lớn</option>
+      </select>
+    </div>
+    <div class="p-field">
+      <label for="subtitleColor">Màu</label>
+      <select id="subtitleColor">
+        <option value="white-black">Trắng / nền đen</option>
+        <option value="yellow-black">Vàng / nền đen</option>
+        <option value="black-white">Đen / nền trắng</option>
+      </select>
+    </div>
+    <p class="p-hint">Kéo trực tiếp ô phụ đề trên video tới vị trí muốn — nhấp đúp hoặc bấm nút dưới để đặt lại.</p>
+    <button type="button" id="btnResetSubPos" class="btn-sm">Đặt lại vị trí đã kéo</button>
+  </div>
+
+  <div class="p-section">
+    <button type="button" id="btnClearCache" class="btn-sm">Xoá cache bài đã thuyết minh</button>
+    <div id="cacheStatus" class="status-sm"></div>
+  </div>
+
+  <button id="btnOptions" type="button" class="btn-primary">Mở Cài đặt (API dịch &amp; giọng đọc)</button>
+  <div class="hint">Vào một bài giảng Coursera rồi bấm nút <b>Thuyết minh tiếng Việt</b> nổi trên video. Đổi ở đây áp dụng cho tab đang mở sau khi tải lại trang.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

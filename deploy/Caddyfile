@@ -1,0 +1,13 @@
+# Sample Caddy config — reverse proxy + automatic HTTPS (Let's Encrypt).
+# Replace "your-domain.com" with a real domain pointing at the server's IP,
+# then run:
+#   caddy run --config Caddyfile
+#
+# The Python server stays bound to 127.0.0.1 (the default, no --host
+# 0.0.0.0 needed) — Caddy is the only thing listening on the public port
+# (80/443); the server itself is never exposed directly. See
+# deploy/README.md for the full setup.
+
+your-domain.com {
+	reverse_proxy 127.0.0.1:18765
+}

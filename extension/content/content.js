@@ -1,0 +1,883 @@
+/**
+ * Content script — chạy trên trang bài giảng Coursera.
+ *
+ * Luồng: bấm nút Dub -> đọc phụ đề tiếng Anh (lib/vtt.js) -> kiểm tra cache
+ * (lib/cache.js) -> nếu chưa có, mở Port tới service worker (background.js)
+ * chạy job dịch (LLM API) + tổng hợp giọng (TTS server local, server/) ->
+ * nhận về MỘT file audio dài bằng video -> phát bằng thẻ <audio> neo cứng
+ * currentTime = video.currentTime. Tua/pause/đổi tốc độ chỉ là một phép gán,
+ * luôn đúng ngay lập tức dù tua tới đâu, không cần buffer.
+ */
+(function () {
+  console.log("[LDUB] content script đã nạp trên", location.href);
+
+  // SVG nhúng thẳng (không dùng sprite <symbol> dùng chung như trang Cài đặt)
+  // — tiêm sprite id cố định vào DOM của Coursera dễ đụng id trùng với chính
+  // trang đó. Nguồn: Lucide (MIT, github.com/lucide-icons/lucide), giữ
+  // nguyên path gốc. stroke="currentColor" ăn theo màu chữ nút.
+  const ICON_MIC =
+    '<svg class="ldub-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>';
+  const ICON_PLAY =
+    '<svg class="ldub-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>';
+
+  const DEFAULT_SETTINGS = {
+    subtitlesOn: false, // chỉ nghe, không hiện phụ đề — bật lại ở popup icon extension
+    subtitlesEnOn: true, // phụ đề tiếng Anh (gốc) — bật mặc định cùng tiếng Việt
+    // Mặc định theo chuẩn Netflix/BBC: chữ trắng nền đen bán trong suốt
+    // (tương phản trắng/đen ~21:1, vượt xa mức tối thiểu WCAG 4.5:1), đặt
+    // dưới video, cỡ vừa. Đổi trong popup icon extension.
+    subtitlePosition: "bottom", // 'bottom' | 'top'
+    subtitleSize: "medium", // 'small' | 'medium' | 'large'
+    subtitleColor: "white-black", // 'white-black' | 'yellow-black' | 'black-white' — 3 preset của Netflix
+    // Lệch tay do người dùng KÉO phụ đề tới vị trí họ muốn — cộng thêm vào vị
+    // trí mặc định tính từ subtitlePosition, không thay thế nó (đổi preset
+    // Trên/Dưới thì lệch tay vẫn giữ nguyên, tính từ mốc mới).
+    subtitleOffsetX: 0,
+    subtitleOffsetY: 0,
+    dubVolume: 1.0,
+    serverUrl: "http://127.0.0.1:18765",
+    serverApiKey: "",
+    voice: "",
+    planVersion: "v1",
+  };
+
+  // % chiều cao video — theo nghiên cứu ngành (phụ đề chuyên nghiệp ~7-10%
+  // chiều cao khung hình ở khoảng cách xem TV); hạ xuống một chút cho màn
+  // hình laptop xem gần. "medium" khớp cỡ chữ mặc định cũ (18px trên video
+  // ~430px cao, để không đổi cảm giác quen thuộc cho người đã dùng trước đó).
+  const SUBTITLE_SIZE_PCT = { small: 0.032, medium: 0.042, large: 0.056 };
+
+  let video = null;
+  let overlay = null;
+  let dubBtn = null;
+  let dockObserver = null;
+  let dockRetryTimer = null;
+  let audioEl = null;
+  let subtitleEl = null;
+  let controlsEl = null;
+  let currentState = "idle"; // idle | loading | ready | error
+  let currentPlan = null;
+  let currentTranslated = null;
+  let currentSubtitles = null;
+  let syncTimer = null;
+  let syncAbort = null; // gỡ listener của lần dub trước (xem startSync)
+  let mode = "dubbed"; // dubbed | original
+  let settings = { ...DEFAULT_SETTINGS };
+  let voicesCache = null;
+  const previewAudioCache = new Map(); // voice -> {base64, mime} — nghe lại không tổng hợp lại
+
+  function videoIdFromUrl() {
+    // .../learn/<course-slug>/lecture/<itemId>/<item-slug>
+    const m = location.pathname.match(/\/learn\/([^/]+)\/lecture\/([^/]+)/);
+    return m ? `${m[1]}::${m[2]}` : location.pathname;
+  }
+
+  async function loadSettings() {
+    const stored = await chrome.storage.local.get("settings");
+    settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  }
+
+  // -------------------------------------------------------------------------
+  // Tìm video + theo dõi điều hướng SPA (Coursera không phát sự kiện điều
+  // hướng công khai nên poll pathname nhẹ nhàng mỗi giây).
+  // -------------------------------------------------------------------------
+
+  function findVideo() {
+    const vids = [...document.querySelectorAll("video")];
+    return vids.find((v) => v.duration > 0) || vids[0] || null;
+  }
+
+  function teardown() {
+    if (syncAbort) {
+      syncAbort.abort();
+      syncAbort = null;
+    }
+    if (syncTimer) {
+      clearInterval(syncTimer);
+      syncTimer = null;
+    }
+    if (audioEl) {
+      audioEl.pause();
+      audioEl.remove();
+      audioEl = null;
+    }
+    if (dockObserver) {
+      dockObserver.disconnect();
+      dockObserver = null;
+    }
+    if (dockRetryTimer) {
+      clearTimeout(dockRetryTimer);
+      dockRetryTimer = null;
+    }
+    if (dubBtn) {
+      dubBtn.remove();
+      dubBtn = null;
+    }
+    if (overlay) {
+      overlay.remove();
+      overlay = null;
+    }
+    if (video) resetVideoVolume();
+    currentState = "idle";
+    currentPlan = currentTranslated = currentSubtitles = null;
+  }
+
+  function resetVideoVolume() {
+    try {
+      video.muted = false;
+      video.volume = 1;
+    } catch (e) {
+      /* video có thể đã bị gỡ khỏi DOM */
+    }
+  }
+
+  let lastPath = "";
+  function watchNavigation() {
+    setInterval(() => {
+      // Coursera là SPA — <video> có thể render SAU thời điểm content script
+      // chạy (document_idle), nên phải thử lại đều đặn, không chỉ khi URL
+      // đổi. Đổi URL thì dọn dẹp overlay/audio cũ trước khi thử lại.
+      if (location.pathname !== lastPath) {
+        lastPath = location.pathname;
+        teardown();
+      }
+      init();
+    }, 1000);
+  }
+
+  async function init() {
+    const v = findVideo();
+    if (!v || v === video) return; // chưa có video, hoặc đã gắn overlay cho đúng video này rồi
+    video = v;
+    console.log("[LDUB] tìm thấy <video>, đang gắn nút Dub...", v);
+    await loadSettings();
+    injectOverlay();
+    console.log("[LDUB] đã gắn nút Dub xong.");
+  }
+
+  // -------------------------------------------------------------------------
+  // UI nổi trên video — dùng position:fixed tính theo getBoundingClientRect
+  // của video, KHÔNG chèn vào cây DOM của Coursera để tránh phá layout player.
+  // -------------------------------------------------------------------------
+
+  function injectOverlay() {
+    overlay = document.createElement("div");
+    overlay.className = "ldub-overlay";
+    overlay.innerHTML = `
+      <div class="ldub-panel" hidden>
+        <div class="ldub-panel-title">Local AI Vietnamese Dubbing</div>
+        <div class="ldub-progress"><div class="ldub-progress-bar"></div></div>
+        <div class="ldub-note">Sẵn sàng.</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    dubBtn = document.createElement("button");
+    dubBtn.className = "ldub-btn ldub-btn-floating";
+    dubBtn.type = "button";
+    dubBtn.title = "Thuyết minh tiếng Việt";
+    dubBtn.innerHTML = `${ICON_MIC}<span class="ldub-btn-text">Thuyết minh tiếng Việt</span>`;
+    dubBtn.addEventListener("click", onDubClick);
+    document.body.appendChild(dubBtn); // vị trí nổi mặc định/dự phòng — xem tryDockToControlBar()
+
+    subtitleEl = document.createElement("div");
+    subtitleEl.className = "ldub-subtitle";
+    subtitleEl.hidden = true;
+    document.body.appendChild(subtitleEl);
+    initSubtitleDrag();
+
+    const reposition = () => positionOverlay();
+    new ResizeObserver(reposition).observe(video);
+    window.addEventListener("scroll", reposition, { passive: true });
+    window.addEventListener("resize", reposition, { passive: true });
+    reposition();
+
+    tryDockToControlBar();
+    tryLoadFromCache();
+  }
+
+  // -------------------------------------------------------------------------
+  // Gắn nút vào thanh điều khiển thật của trình phát (cạnh nút tốc độ "1x"/
+  // "2x"...), theo đúng vị trí người dùng chỉ định — thay vì nổi rời trên
+  // video. RỦI RO THẬT: thanh điều khiển này gần như chắc chắn do framework
+  // (React) tự vẽ lại (timestamp nhảy mỗi giây), có thể TỰ XOÁ node của mình
+  // ở lần vẽ lại kế tiếp vì nó không nằm trong cây mà framework quản lý.
+  //
+  // Neo bằng aria-label ("Video playback rate switcher") thay vì tên class —
+  // class do build tool sinh ra (kiểu "css-179heut") đổi mỗi lần Coursera
+  // deploy lại, còn aria-label ổn định hơn nhiều vì nó phục vụ accessibility,
+  // không đổi theo tốc độ hiện tại (khác với chữ hiển thị "1x"/"2x"...).
+  //
+  // Thất bại (không tìm thấy, hoặc bị xoá liên tục) thì tự rơi về vị trí nổi
+  // sẵn có (đã kiểm chứng hoạt động) — không bao giờ để mất nút hẳn.
+  // -------------------------------------------------------------------------
+
+  const SPEED_BTN_SELECTOR =
+    'button[aria-label="Video playback rate switcher"]';
+  const SPEED_BTN_TEXT_RE = /^\d+(\.\d+)?x$/i; // dự phòng nếu Coursera đổi aria-label
+
+  function findSpeedControlNear(v) {
+    let btn = document.querySelector(SPEED_BTN_SELECTOR);
+    if (btn) return btn;
+    const vr = v.getBoundingClientRect();
+    for (const el of document.querySelectorAll('button, [role="button"]')) {
+      const text = (el.textContent || "").trim();
+      if (!SPEED_BTN_TEXT_RE.test(text)) continue;
+      const r = el.getBoundingClientRect();
+      // Phải nằm gần video (dưới hoặc ngang mép dưới) — tránh bắt nhầm "2x"
+      // xuất hiện ở chỗ khác trên trang.
+      if (r.top < vr.top - 20 || r.top > vr.bottom + 80) continue;
+      if (r.left < vr.left - 20 || r.right > vr.right + 20) continue;
+      btn = el;
+      break;
+    }
+    return btn || null;
+  }
+
+  function tryDockToControlBar() {
+    if (!video || !dubBtn) return;
+    try {
+      const speedBtn = findSpeedControlNear(video);
+      const slot = speedBtn
+        ? speedBtn.closest("div") || speedBtn.parentElement
+        : null;
+      const row = slot ? slot.parentElement : null;
+      if (!slot || !row) {
+        scheduleDockRetry();
+        return;
+      }
+
+      row.appendChild(dubBtn); // cuối hàng — ngoài cùng bên phải, sau nút Toàn màn hình
+      dubBtn.classList.remove("ldub-btn-floating");
+      dubBtn.classList.add("ldub-btn-docked");
+      dubBtn.style.position = ""; // bỏ fixed — chạy theo flow thật của thanh điều khiển
+      dubBtn.style.top = dubBtn.style.left = dubBtn.style.bottom = "";
+      positionOverlay(); // panel bám theo vị trí mới của nút
+
+      if (dockObserver) dockObserver.disconnect();
+      dockObserver = new MutationObserver(() => {
+        if (!row.contains(dubBtn)) tryDockToControlBar(); // bị framework vẽ lại đè mất — gắn lại ngay
+      });
+      dockObserver.observe(row, { childList: true });
+    } catch (e) {
+      console.warn(
+        "[LDUB] không gắn được vào thanh điều khiển Coursera, giữ vị trí nổi.",
+        e,
+      );
+    }
+  }
+
+  function scheduleDockRetry() {
+    // Thanh điều khiển có thể chưa render xong lúc nút Dub được gắn
+    // (document_idle chạy sớm hơn React thuỷ hợp). Thử lại vài lần trong vài
+    // giây đầu rồi bỏ cuộc, giữ vị trí nổi — không thử vô hạn, tránh tốn CPU
+    // nếu Coursera đổi hẳn cấu trúc UI khác.
+    clearTimeout(dockRetryTimer);
+    let attempts = 0;
+    const tick = () => {
+      attempts++;
+      if (dubBtn && dubBtn.classList.contains("ldub-btn-docked")) return;
+      if (findSpeedControlNear(video)) {
+        tryDockToControlBar();
+        return;
+      }
+      if (attempts < 6) dockRetryTimer = setTimeout(tick, 1000);
+    };
+    dockRetryTimer = setTimeout(tick, 1000);
+  }
+
+  function positionOverlay() {
+    if (!video || !overlay || !dubBtn) return;
+    const r = video.getBoundingClientRect();
+    if (!dubBtn.classList.contains("ldub-btn-docked")) {
+      // Vị trí nổi (mặc định/dự phòng khi không gắn được vào thanh điều
+      // khiển): neo gần đáy-phải video, sát khu vực thanh điều khiển/tua của
+      // trình phát thay vì góc trên (trước đây đụng nút "Download this
+      // video" của Coursera).
+      const btnClearance = Math.max(64, r.height * 0.11);
+      dubBtn.style.position = "fixed";
+      dubBtn.style.top = "auto";
+      dubBtn.style.bottom =
+        Math.round(window.innerHeight - r.bottom + btnClearance) + "px";
+      dubBtn.style.left = r.left + r.width - dubBtn.offsetWidth - 12 + "px";
+    }
+    // Panel luôn bám theo vị trí THẬT của nút (đọc getBoundingClientRect trực
+    // tiếp) — đúng cả khi nút đang nổi lẫn khi đã gắn trong thanh điều khiển.
+    const br = dubBtn.getBoundingClientRect();
+    overlay.style.top = "auto";
+    overlay.style.left = "auto";
+    overlay.style.right = Math.round(window.innerWidth - br.right) + "px";
+    overlay.style.bottom = Math.round(window.innerHeight - br.top + 8) + "px";
+    if (subtitleEl) {
+      subtitleEl.style.left = r.left + "px";
+      subtitleEl.style.width = r.width + "px";
+      subtitleEl.style.fontSize =
+        Math.round(
+          r.height *
+            (SUBTITLE_SIZE_PCT[settings.subtitleSize] ||
+              SUBTITLE_SIZE_PCT.medium),
+        ) + "px";
+      subtitleEl.dataset.color = settings.subtitleColor || "white-black";
+
+      // "bottom" neo từ đáy video đi lên — box cao thêm khi bật cả 2 dòng
+      // Anh+Việt vẫn tự đẩy lên đúng, không cần đoán chiều cao box trước.
+      // Clearance co giãn theo cỡ video: người dùng Coursera từng thấy phụ
+      // đề đè lên thanh điều khiển của trình phát ở mức cố định 64px — nới
+      // rộng + cho đổi sang "Trên" trong popup, hoặc tự KÉO ô phụ đề, nếu
+      // skin trình phát khác vẫn còn che (không có DOM Coursera thật để
+      // test hết mọi trường hợp).
+      if (settings.subtitlePosition === "top") {
+        subtitleEl.style.top =
+          Math.round(r.top + Math.max(16, r.height * 0.03)) + "px";
+        subtitleEl.style.bottom = "auto";
+      } else {
+        const clearance = Math.max(72, r.height * 0.12);
+        subtitleEl.style.bottom =
+          Math.round(window.innerHeight - r.bottom + clearance) + "px";
+        subtitleEl.style.top = "auto";
+      }
+      // Lệch tay do người dùng tự kéo — cộng thêm vào vị trí mặc định vừa
+      // tính, không đụng top/bottom ở trên (transform không ảnh hưởng layout
+      // nên video/scroll đổi kích thước vẫn tính lại đúng gốc trước khi cộng lệch).
+      subtitleEl.style.transform = `translate(${settings.subtitleOffsetX || 0}px, ${settings.subtitleOffsetY || 0}px)`;
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // Kéo phụ đề tới vị trí muốn — không phải mọi giao diện Coursera đều đoán
+  // đúng bằng preset Trên/Dưới, nên cho tự kéo là chắc chắn nhất. Nhấp đúp
+  // để đặt lại vị trí mặc định.
+  // ------------------------------------------------------------------------
+  let subtitleDrag = null; // {startX, startY, startOffX, startOffY} khi đang kéo
+
+  function initSubtitleDrag() {
+    subtitleEl.addEventListener("pointerdown", (e) => {
+      if (!e.target.closest(".ldub-sub-box")) return;
+      subtitleDrag = {
+        startX: e.clientX,
+        startY: e.clientY,
+        startOffX: settings.subtitleOffsetX || 0,
+        startOffY: settings.subtitleOffsetY || 0,
+      };
+      subtitleEl.classList.add("ldub-dragging");
+      subtitleEl.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    subtitleEl.addEventListener("pointermove", (e) => {
+      if (!subtitleDrag) return;
+      settings.subtitleOffsetX =
+        subtitleDrag.startOffX + (e.clientX - subtitleDrag.startX);
+      settings.subtitleOffsetY =
+        subtitleDrag.startOffY + (e.clientY - subtitleDrag.startY);
+      subtitleEl.style.transform = `translate(${settings.subtitleOffsetX}px, ${settings.subtitleOffsetY}px)`;
+    });
+    const endDrag = () => {
+      if (!subtitleDrag) return;
+      subtitleDrag = null;
+      subtitleEl.classList.remove("ldub-dragging");
+      chrome.storage.local.set({ settings }); // nhớ vị trí cho lần xem sau
+    };
+    subtitleEl.addEventListener("pointerup", endDrag);
+    subtitleEl.addEventListener("pointercancel", endDrag);
+    subtitleEl.addEventListener("dblclick", (e) => {
+      if (!e.target.closest(".ldub-sub-box")) return;
+      settings.subtitleOffsetX = 0;
+      settings.subtitleOffsetY = 0;
+      chrome.storage.local.set({ settings });
+      positionOverlay();
+    });
+  }
+
+  /** Nút chỉ còn icon (xem .ldub-btn trong CSS) — text vẫn cập nhật trong DOM
+   * (đọc được bằng screen reader) và làm title, hiện khi rê chuột vào. */
+  function setBtnLabel(text) {
+    dubBtn.querySelector(".ldub-btn-text").textContent = text;
+    dubBtn.title = text;
+  }
+
+  function setPanel(pct, note, open) {
+    const panel = overlay.querySelector(".ldub-panel");
+    const bar = overlay.querySelector(".ldub-progress-bar");
+    const noteEl = overlay.querySelector(".ldub-note");
+    if (open !== undefined) panel.hidden = !open;
+    if (pct !== undefined)
+      bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    if (note !== undefined) noteEl.textContent = note;
+    positionOverlay(); // panel đổi kích thước có thể làm overlay lệch khỏi mép phải video
+  }
+
+  // -------------------------------------------------------------------------
+  // Cache: nếu bài này đã thuyết minh trước đó (đúng giọng), dùng lại ngay,
+  // không gọi lại API dịch / TTS server.
+  // -------------------------------------------------------------------------
+
+  async function tryLoadFromCache() {
+    try {
+      const rec = await DUB.cache.get({
+        videoId: videoIdFromUrl(),
+        voice: settings.voice,
+        planVersion: settings.planVersion,
+      });
+      if (rec && rec.audioBase64) {
+        setBtnLabel("Xem lại bản đã thuyết minh");
+      }
+    } catch (e) {
+      /* IndexedDB có thể bị chặn (chế độ ẩn danh) — bỏ qua, không chặn luồng chính */
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Bấm nút Dub
+  // -------------------------------------------------------------------------
+
+  async function onDubClick() {
+    if (currentState === "ready") {
+      toggleControls();
+      return;
+    }
+    if (currentState === "loading") return;
+
+    setPanel(2, "Đang đọc phụ đề tiếng Anh...", true);
+    currentState = "loading";
+
+    const videoId = videoIdFromUrl();
+    try {
+      const cached = await DUB.cache
+        .get({
+          videoId,
+          voice: settings.voice,
+          planVersion: settings.planVersion,
+        })
+        .catch(() => null);
+      if (cached && cached.audioBase64) {
+        setPanel(80, "Đang tải từ cache...", true);
+        applyResult(cached);
+        return;
+      }
+
+      const cues = await DUB.vtt.getEnglishCues(video);
+      if (!cues || !cues.length) {
+        setPanel(
+          0,
+          "Không tìm thấy phụ đề tiếng Anh cho bài này. Hãy bật CC trên player rồi thử lại.",
+          true,
+        );
+        currentState = "error";
+        return;
+      }
+
+      const port = chrome.runtime.connect({ name: "dub-job" });
+      port.onMessage.addListener((msg) => {
+        if (msg.type === "PROGRESS") setPanel(msg.pct, msg.note, true);
+        else if (msg.type === "DONE") {
+          const record = {
+            videoId,
+            voice: settings.voice,
+            planVersion: settings.planVersion,
+            ...msg,
+          };
+          DUB.cache
+            .put(
+              {
+                videoId,
+                voice: settings.voice,
+                planVersion: settings.planVersion,
+              },
+              record,
+            )
+            .catch(() => {});
+          applyResult(record);
+        } else if (msg.type === "ERROR") {
+          setPanel(0, "Lỗi: " + msg.message, true);
+          currentState = "error";
+        }
+      });
+      port.postMessage({
+        type: "START",
+        videoId,
+        durationSec: video.duration,
+        cues,
+      });
+    } catch (e) {
+      setPanel(0, "Lỗi: " + (e && e.message ? e.message : String(e)), true);
+      currentState = "error";
+    }
+  }
+
+  function applyResult(record) {
+    currentPlan = record.plan || null;
+    currentTranslated = record.translated || null;
+    currentSubtitles = record.subtitles;
+
+    const blob = base64ToBlob(
+      record.audioBase64,
+      record.audioMime || "audio/opus",
+    );
+    if (audioEl) {
+      audioEl.pause();
+      audioEl.remove();
+    }
+    audioEl = document.createElement("audio");
+    audioEl.id = "ldub-audio";
+    audioEl.preload = "auto";
+    audioEl.src = URL.createObjectURL(blob);
+    audioEl.style.display = "none";
+    document.body.appendChild(audioEl);
+    try {
+      audioEl.preservesPitch = true;
+      audioEl.mozPreservesPitch = true;
+      audioEl.webkitPreservesPitch = true;
+    } catch (e) {
+      /* trình duyệt cũ không hỗ trợ, chấp nhận đổi cao độ khi đổi tốc độ */
+    }
+
+    currentState = "ready";
+    setPanel(100, "Sẵn sàng — đã thuyết minh.", false);
+    setBtnLabel("Đang thuyết minh");
+    dubBtn.classList.add("ldub-btn-active");
+
+    injectControls();
+    startSync();
+    setMode("dubbed");
+  }
+
+  function base64ToBlob(base64, mime) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  // -------------------------------------------------------------------------
+  // Đồng bộ — neo cứng: gán currentTime theo video, không cộng dồn thời
+  // lượng segment nào cả nên tua tới đâu cũng đúng ngay, không cần buffer.
+  // -------------------------------------------------------------------------
+
+  // Lệch dưới ngưỡng này coi như khớp — không chỉnh gì, tránh rung liên tục.
+  const SYNC_DEADBAND_SEC = 0.04;
+  // Lệch trên ngưỡng này mới tua cứng (nghe rõ chỗ cắt). Dưới nó chỉnh bằng
+  // playbackRate để tai không nhận ra.
+  const SYNC_HARD_SEC = 0.3;
+  // Biên chỉnh tốc độ mềm. 5% với preservesPitch=true là không nghe ra.
+  const SYNC_RATE_TRIM = 0.05;
+
+  function hardResync() {
+    if (!video || !audioEl) return;
+    // audio có thể chưa sẵn sàng nhận currentTime ngay sau khi đổi src —
+    // bỏ qua lần này, vòng lặp sync 250ms sẽ chỉnh lại.
+    try {
+      audioEl.currentTime = video.currentTime;
+    } catch (e) {
+      /* thử lại ở tick sau */
+    }
+  }
+
+  function resumeIfPlaying() {
+    if (!video || !audioEl) return;
+    if (!video.paused && mode !== "original") audioEl.play().catch(() => {});
+  }
+
+  function startSync() {
+    // startSync() chạy lại mỗi lần đổi giọng. Không gỡ listener cũ thì handler
+    // chồng lên nhau, mỗi sự kiện tua chạy nhiều lần và audio bị giật.
+    if (syncAbort) syncAbort.abort();
+    syncAbort = new AbortController();
+    const on = (target, ev, fn) =>
+      target.addEventListener(ev, fn, { signal: syncAbort.signal });
+
+    hardResync();
+    applyVolumeForMode();
+    audioEl.playbackRate = video.playbackRate;
+
+    on(video, "play", resumeIfPlaying);
+    on(video, "pause", () => audioEl.pause());
+    on(video, "ratechange", () => {
+      audioEl.playbackRate = video.playbackRate;
+    });
+
+    // Tua: DỪNG audio trước rồi mới nhảy, và chỉ phát lại ở 'seeked' khi video
+    // đã chốt vị trí cuối. Để audio chạy tiếp trong lúc video còn đang seek thì
+    // nó đọc trước hình rồi bị kéo giật ngược — đúng cảm giác "tua không mượt".
+    on(video, "seeking", () => audioEl.pause());
+    on(video, "seeked", () => {
+      hardResync();
+      resumeIfPlaying();
+    });
+
+    // Video buffer giữa chừng — im lặng chờ thay vì đọc tiếp một mình.
+    on(video, "waiting", () => audioEl.pause());
+    on(video, "playing", () => {
+      hardResync();
+      resumeIfPlaying();
+    });
+    on(video, "ended", () => audioEl.pause());
+
+    if (syncTimer) clearInterval(syncTimer);
+    syncTimer = setInterval(tickSync, 250);
+  }
+
+  function tickSync() {
+    if (!video || !audioEl) return;
+    updateSubtitle();
+    if (video.paused || video.seeking || mode === "original") return;
+
+    // Lưới an toàn: 'waiting' đã pause audio nhưng 'playing' không phải lúc nào
+    // cũng bắn (đổi tab, player tự phục hồi) — tự phát lại thay vì đứng im.
+    if (audioEl.paused) {
+      audioEl.play().catch(() => {});
+      return;
+    }
+
+    const drift = video.currentTime - audioEl.currentTime; // > 0: audio đang chậm
+    const base = video.playbackRate;
+
+    if (Math.abs(drift) > SYNC_HARD_SEC) {
+      hardResync();
+      audioEl.playbackRate = base;
+    } else if (Math.abs(drift) > SYNC_DEADBAND_SEC) {
+      // Kéo audio về đúng chỗ bằng cách đi nhanh/chậm hơn vài phần trăm thay vì
+      // tua cứng — không cắt tiếng giữa câu.
+      const trim = Math.max(
+        -SYNC_RATE_TRIM,
+        Math.min(SYNC_RATE_TRIM, drift * 0.5),
+      );
+      audioEl.playbackRate = base * (1 + trim);
+    } else if (audioEl.playbackRate !== base) {
+      audioEl.playbackRate = base;
+    }
+  }
+
+  function updateSubtitle() {
+    const showVi = settings.subtitlesOn && mode !== "original";
+    const showEn = settings.subtitlesEnOn && mode !== "original";
+    if ((!showVi && !showEn) || !currentSubtitles) {
+      subtitleEl.hidden = true;
+      return;
+    }
+    const t = video.currentTime;
+    const seg = currentSubtitles.find((s) => t >= s.start && t <= s.end);
+    const vi = showVi && seg ? seg.vi : "";
+    const en = showEn && seg ? seg.en : "";
+    if (!vi && !en) {
+      subtitleEl.hidden = true;
+      return;
+    }
+    subtitleEl.innerHTML = "";
+    const box = document.createElement("span");
+    box.className = "ldub-sub-box";
+    // Tiếng Anh (gốc) nhỏ hơn, mờ hơn — phụ, đọc lướt qua. Tiếng Việt
+    // (bản dịch, mục đích chính của extension) đậm và to hơn.
+    if (en) {
+      const l = document.createElement("span");
+      l.className = "ldub-sub-line ldub-sub-en";
+      l.textContent = en;
+      box.appendChild(l);
+    }
+    if (vi) {
+      const l = document.createElement("span");
+      l.className = "ldub-sub-line ldub-sub-vi";
+      l.textContent = vi;
+      box.appendChild(l);
+    }
+    subtitleEl.appendChild(box);
+    subtitleEl.hidden = false;
+  }
+
+  // -------------------------------------------------------------------------
+  // Bảng điều khiển: Gốc / Thuyết minh, phụ đề, âm lượng, đổi giọng.
+  // -------------------------------------------------------------------------
+
+  function injectControls() {
+    if (controlsEl) controlsEl.remove();
+    controlsEl = document.createElement("div");
+    controlsEl.className = "ldub-controls";
+    controlsEl.hidden = true;
+    controlsEl.innerHTML = `
+      <div class="ldub-seg" role="radiogroup" aria-label="Chế độ phát">
+        <label class="ldub-seg-opt"><input type="radio" name="ldub-mode" value="dubbed" checked><span>Thuyết minh</span></label>
+        <label class="ldub-seg-opt"><input type="radio" name="ldub-mode" value="original"><span>Gốc</span></label>
+      </div>
+      <label class="ldub-row ldub-switch-row">
+        <span>Phụ đề tiếng Việt</span>
+        <span class="ldub-switch"><input type="checkbox" class="ldub-cc" ${settings.subtitlesOn ? "checked" : ""}><span class="ldub-switch-track"></span></span>
+      </label>
+      <div class="ldub-block">
+        <div class="ldub-block-label">Giọng đọc</div>
+        <span class="ldub-voice-pick">
+          <select class="ldub-voice"></select>
+          <button type="button" class="ldub-preview-btn" title="Nghe thử giọng này">${ICON_PLAY}</button>
+        </span>
+      </div>
+      <div class="ldub-hint"></div>
+    `;
+    overlay.appendChild(controlsEl);
+    populateVoiceSelect();
+
+    controlsEl.querySelectorAll('input[name="ldub-mode"]').forEach((el) => {
+      el.addEventListener("change", (e) => setMode(e.target.value));
+    });
+    controlsEl.querySelector(".ldub-cc").addEventListener("change", (e) => {
+      settings.subtitlesOn = e.target.checked;
+      chrome.storage.local.set({ settings });
+      updateSubtitle();
+    });
+    controlsEl
+      .querySelector(".ldub-voice")
+      .addEventListener("change", (e) => onVoiceChange(e.target.value));
+    controlsEl
+      .querySelector(".ldub-preview-btn")
+      .addEventListener("click", onPreviewVoiceClick);
+  }
+
+  async function onPreviewVoiceClick(e) {
+    const btn = e.currentTarget;
+    const hint = controlsEl.querySelector(".ldub-hint");
+    const voice = controlsEl.querySelector(".ldub-voice").value;
+
+    const cached = previewAudioCache.get(voice);
+    if (cached) {
+      new Audio(
+        URL.createObjectURL(base64ToBlob(cached.base64, cached.mime)),
+      ).play();
+      hint.textContent = "Đang phát (đã nhớ từ lần trước).";
+      return;
+    }
+
+    // Chỉ đổi trạng thái disabled/mờ đi khi đang chờ — giữ nguyên icon SVG
+    // bên trong nút (không đụng innerHTML/textContent của nút này).
+    btn.disabled = true;
+    hint.textContent = "Đang tổng hợp câu mẫu...";
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "TTS_PREVIEW_LOCAL",
+        serverUrl: settings.serverUrl,
+        serverApiKey: settings.serverApiKey,
+        voice,
+        timeoutMs: 30000,
+        text: "Xin chào, đây là giọng đọc thử cho video bài giảng tiếng Việt.",
+      });
+      if (!res.ok) {
+        hint.textContent = "Lỗi nghe thử: " + res.error;
+        return;
+      }
+      previewAudioCache.set(voice, { base64: res.base64, mime: res.mime });
+      const blob = base64ToBlob(res.base64, res.mime || "audio/wav");
+      new Audio(URL.createObjectURL(blob)).play();
+      hint.textContent = "Đang phát...";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /** Danh sách giọng lấy động từ TTS server (GET /api/voices) — không đoán tên. */
+  async function populateVoiceSelect() {
+    const sel = controlsEl.querySelector(".ldub-voice");
+    const hint = controlsEl.querySelector(".ldub-hint");
+    if (!voicesCache) {
+      sel.innerHTML = "<option>Đang tải danh sách giọng...</option>";
+      sel.disabled = true;
+      const res = await chrome.runtime.sendMessage({
+        type: "FETCH_TTS_VOICES",
+        serverUrl: settings.serverUrl,
+        serverApiKey: settings.serverApiKey,
+        timeoutMs: 15000,
+      });
+      if (!res.ok) {
+        sel.innerHTML = "<option>Không tải được danh sách giọng</option>";
+        hint.textContent = "Lỗi: " + res.error;
+        return;
+      }
+      voicesCache = res.voices;
+    }
+    sel.disabled = false;
+    sel.innerHTML = "";
+    voicesCache.forEach((v) => {
+      const opt = document.createElement("option");
+      opt.value = v.id;
+      opt.textContent = v.label || v.id;
+      sel.appendChild(opt);
+    });
+    if (settings.voice && voicesCache.some((v) => v.id === settings.voice))
+      sel.value = settings.voice;
+    else if (sel.options.length) {
+      settings.voice = sel.value;
+      chrome.storage.local.set({ settings });
+    }
+    hint.textContent =
+      "Đổi giọng sẽ tổng hợp lại (không tốn lượt gọi API dịch).";
+  }
+
+  function toggleControls() {
+    if (controlsEl) {
+      controlsEl.hidden = !controlsEl.hidden;
+      positionOverlay();
+    }
+  }
+
+  function setMode(next) {
+    mode = next;
+    applyVolumeForMode();
+    if (mode === "original") {
+      audioEl.pause();
+    } else if (!video.paused) {
+      audioEl.currentTime = video.currentTime;
+      audioEl.play().catch(() => {});
+    }
+    updateSubtitle();
+  }
+
+  // Chỉ 2 chế độ: Gốc (mute audio thuyết minh, mở lại âm video) hoặc
+  // Thuyết minh (mute video, phát audio thuyết minh) — không còn chế độ
+  // "Cả hai" (phát cùng lúc, dễ nghe rối hai giọng chồng nhau).
+  function applyVolumeForMode() {
+    if (mode === "original") {
+      video.muted = false;
+      audioEl.volume = 0;
+    } else {
+      video.muted = true;
+      audioEl.volume = settings.dubVolume ?? 1;
+    }
+  }
+
+  async function onVoiceChange(voice) {
+    settings.voice = voice;
+    chrome.storage.local.set({ settings });
+    if (!currentPlan || !currentTranslated) return;
+
+    setPanel(5, "Đang đổi giọng...", true);
+    const videoId = videoIdFromUrl();
+    const port = chrome.runtime.connect({ name: "dub-job" });
+    port.onMessage.addListener((msg) => {
+      if (msg.type === "PROGRESS") setPanel(msg.pct, msg.note, true);
+      else if (msg.type === "DONE") {
+        const record = {
+          videoId,
+          voice,
+          planVersion: settings.planVersion,
+          plan: msg.plan,
+          translated: msg.translated,
+          audioBase64: msg.audioBase64,
+          audioMime: msg.audioMime,
+          subtitles: msg.subtitles,
+        };
+        DUB.cache
+          .put({ videoId, voice, planVersion: settings.planVersion }, record)
+          .catch(() => {});
+        applyResult(record);
+      } else if (msg.type === "ERROR") {
+        setPanel(0, "Lỗi đổi giọng: " + msg.message, true);
+      }
+    });
+    port.postMessage({
+      type: "RESYNTH",
+      plan: currentPlan,
+      translated: currentTranslated,
+      voice,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+
+  watchNavigation();
+  init();
+})();
