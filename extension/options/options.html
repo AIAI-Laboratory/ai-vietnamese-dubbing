@@ -95,7 +95,7 @@
       <header class="content-head">
         <div>
           <h1 id="contentTitle">Dịch</h1>
-          <p id="contentSub" class="content-sub">Tương thích OpenAI — dùng được với OpenAI, Gemini, Groq hoặc endpoint riêng của bạn.</p>
+          <p id="contentSub" class="content-sub">Gemini API chính thức, chỉ cần một API key.</p>
         </div>
         <div class="content-head-actions">
           <span id="saveStatus" class="status status-inline"></span>
@@ -108,35 +108,26 @@
       <section id="tab-translate" class="tab-panel active">
         <div class="card">
           <div class="card-head"><svg class="icon"><use href="#i-key"/></svg><h2>Kết nối</h2></div>
-          <div class="field-grid">
-            <div class="field">
-              <label for="apiBaseUrl">Base URL</label>
-              <input type="text" id="apiBaseUrl" placeholder="https://api.openai.com/v1">
-            </div>
-            <div class="field">
-              <label for="apiKey">API key</label>
-              <input type="password" id="apiKey" placeholder="sk-...">
-            </div>
+          <div class="field">
+            <label for="geminiApiKey">Gemini API key</label>
+            <input type="password" id="geminiApiKey" placeholder="AIza..." autocomplete="off">
           </div>
           <div class="field">
-            <label for="model">Model</label>
-            <div class="field-row">
-              <input type="text" id="model" placeholder="vd: gpt-4o-mini, gemini-2.5-flash...">
-              <select id="modelList"><option value="">— danh sách đã tải —</option></select>
-            </div>
+            <label>Model dịch</label>
+            <div class="readonly-value">Gemini 3.1 Flash-Lite</div>
+            <p class="field-hint">Dùng Gemini API chính thức. Chỉ cần API key; extension tự gọi generateContent với model Flash-Lite, tối ưu cho translation và số lượng request lớn.</p>
           </div>
           <div class="btn-row">
-            <button id="btnLoadModels" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-download"/></svg>Tải danh sách model</button>
-            <button id="btnTestModel" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-check"/></svg>Kiểm tra model</button>
+            <button id="btnTestGemini" type="button" class="btn btn-ghost"><svg class="icon"><use href="#i-check"/></svg>Kiểm tra Gemini</button>
           </div>
-          <div id="apiStatus" class="status"></div>
+          <div id="apiStatus" class="status" role="status" aria-live="polite"></div>
         </div>
 
       </section>
 
       <section id="tab-voice" class="tab-panel">
-        <p class="tab-note">Server chạy trên máy bạn, audio/video không rời khỏi máy. Engine gTTS gửi văn bản đã dịch lên mạng để đọc —
-          xem cảnh báo trong <code>server/README.md</code> mục "gTTS". File đó có hướng dẫn chạy server (Python, xem <code>server/README.md</code>).</p>
+        <p class="tab-note">Server và Kokoro-Vietnamese chạy trên máy bạn; audio, video và bản dịch không được gửi tới dịch vụ giọng nói.
+          Xem hướng dẫn cài model trong <code>server/README.md</code>.</p>
 
         <div class="card">
           <div class="card-head"><svg class="icon"><use href="#i-server"/></svg><h2>Server</h2></div>
@@ -176,7 +167,7 @@
           </div>
           <p class="field-hint">
             Tốc độ đọc tiếng Việt tham chiếu — quyết định câu dịch dài bao nhiêu thì vừa khung hình.
-            Mặc định 3.0 đo được từ gTTS (engine duy nhất đang dùng).
+            Baseline là 2.6 theo benchmark Kokoro CPU; tốc độ thực tế phụ thuộc voice.
             Số thật của lần chạy gần nhất nằm ở <code>measuredSyllablesPerSec</code> trong log.
           </p>
         </div>

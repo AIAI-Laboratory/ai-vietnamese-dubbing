@@ -298,6 +298,15 @@ input[type="text"], input[type="password"], input[type="number"], select {
   border-radius: 9px;
   transition: border-color .12s ease, background .12s ease, box-shadow .12s ease;
 }
+.readonly-value {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  background: var(--code-bg);
+  border: 1.5px solid var(--line);
+  border-radius: 9px;
+}
 input[type="text"]:focus, input[type="password"]:focus, input[type="number"]:focus, select:focus {
   outline: none;
   border-color: var(--accent);
