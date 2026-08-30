@@ -30,8 +30,7 @@ tmux new -s localdub
 # Ctrl+B then D to detach without stopping the server. Reattach: tmux attach -t localdub
 ```
 
-On startup it logs its environment, detected public IP, and the Swagger
-UI link.
+On startup it logs its environment and the Swagger UI link.
 
 ## 4. HTTPS via Caddy
 

@@ -1,8 +1,10 @@
 # TTS server
 
-Python + FastAPI, API-only — no UI or dashboard. Swagger UI is
-auto-generated at `/docs`: click **Authorize**, paste your API key, and
-try requests directly from there.
+Python + FastAPI, API-only. Swagger UI is available at `/docs`: click
+**Authorize**, paste the API key, then run requests directly from the page.
+
+Speech synthesis uses Kokoro-Vietnamese ONNX on the local CPU. After the
+model is downloaded, translated text is not sent to a speech provider.
 
 ## Install
 
@@ -12,97 +14,94 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt   # Windows
 # .venv/bin/pip install -r requirements.txt     # macOS/Linux
 
-cp .env.example .env
-python -c "import secrets; print(secrets.token_hex(16))"   # paste into API_KEY in .env
+copy .env.example .env                          # Windows
+# cp .env.example .env                          # macOS/Linux
+python -c "import secrets; print(secrets.token_hex(16))"
 ```
 
-Always use a virtualenv — installing straight into the system Python can
-break version constraints of unrelated tools.
+Paste the generated key into `API_KEY` in `.env`. Installation requires
+Python 3.10+, `git`, and `ffmpeg`. Always use a virtualenv.
 
-Requires `ffmpeg` on your PATH — used to decode gTTS's MP3 output, time-
-stretch audio to fit each subtitle slot, and export the final Opus/MP3.
-
-## Auth
-
-The server **refuses to start** if `API_KEY` is empty in `.env`. There is
-no "local means no auth needed" fallback — it's an API server, and an
-unauthenticated one is callable by anyone who knows the address.
-
-Every route (`/api/health`, `/api/voices`, `/api/preview`,
-`/api/synthesize`, `/api/job/{id}`, `/audio/{file}`) requires the
-`X-API-Key` header to match `.env`. `/docs` and `/openapi.json` (the
-Swagger UI page itself, not an API route) are the only exceptions, so the
-docs page can load before you authorize.
+The first start downloads the ONNX model (about 311 MB), config, and default
+voicepack from Hugging Face. Later starts use the local cache. Set `HF_HOME`
+to control the cache location.
 
 ## Run
 
 ```bash
 .venv\Scripts\python main.py     # Windows
-.venv/bin/python main.py         # macOS/Linux
+# .venv/bin/python main.py       # macOS/Linux
 ```
 
-Config loads from `server/.env` automatically (via `python-dotenv`).
-Default port `18765`, host `127.0.0.1` — override via `.env` or flags:
+The default address is `http://127.0.0.1:18765`. Override it through `.env`
+or command-line flags:
 
 ```bash
 .venv/bin/python main.py --host 0.0.0.0 --port 9000
 ```
 
-### Logs
+Logs are written to the console and the OS temp directory at
+`local-ai-vi-dub/server.log`.
 
-Written to both the console and `server.log` in a temp directory —
-Windows: `%TEMP%\local-ai-vi-dub\server.log`; macOS/Linux: `$TMPDIR` or
-`/tmp/local-ai-vi-dub/server.log`.
+## Auth
 
-On startup the server logs its environment (OS/arch/Python version) and
-the Swagger UI link. If `--host` is `0.0.0.0`/`::`, it also tries to
-detect your public IP via `api.ipify.org` (fails silently if unreachable).
+The server refuses to start if `API_KEY` is empty. Every API and audio route
+requires `X-API-Key`; `/docs` and `/openapi.json` remain public so Swagger can
+load before authorization.
 
-## gTTS: an unofficial endpoint
+## Kokoro engine
 
-The only engine (`tts_engine.GttsEngine`, wrapping the `gTTS` package)
-calls `translate.google.com`, which Google does not publish an SDK or SLA
-for. Real, not theoretical, risks:
+`tts_engine.KokoroOnnxEngine` keeps one ONNX session warm for the server
+lifetime. Voicepacks are loaded on demand and cached without loading another
+copy of the model. CPU jobs run one at a time to avoid contention.
 
-- It can stop working or get rate-limited without notice.
-- Automated use may violate Google Translate's Terms of Service.
-- Translated text (not the original audio/video) is sent over the network.
+Set `KOKORO_VOICE` in `.env` to choose the default. Query `GET /api/voices`
+for all voice IDs. Existing extension settings that contain the old gTTS
+voice ID `vi` automatically use the configured Kokoro default.
 
-The trade-off: free, no model to install, faster than local CPU synthesis.
-There is no mock fallback — if the engine fails to load, `/api/health`
-reports `"status":"error"` directly.
+Common technical acronyms such as API, HTTPS, JSON, CPU, and GPU are converted
+to Vietnamese spoken forms before synthesis; subtitle text is unchanged.
 
 ## API
 
-Full reference (and a live tester) at `GET /docs`. Summary:
-
+```text
+GET  /api/health               -> loading | ready | error
+GET  /api/voices               -> available Kokoro voices
+POST /api/preview              -> WAV preview
+POST /api/debug/transcript     -> save translation debug JSON under server/debug_transcripts
+POST /api/synthesize           -> jobId
+GET  /api/job/{jobId}          -> queued | running | done | error
+GET  /audio/{jobId}.{ext}      -> final Opus/MP3 audio
 ```
-GET  /api/health              -> {"ok","status":"loading"|"ready"|"error","model","mock","error"}
-GET  /api/voices               -> {"voices":[{"id","label"}]}  (503 while loading)
-POST /api/preview              body {text,voice} -> WAV file
-POST /api/synthesize           body {voice,durationSec,segments:[{id,start,end,vi}]} -> {"jobId"}
-GET  /api/job/{jobId}          -> {"status","progress","audioUrl","measuredSyllablesPerSec","segments","error",...}
-GET  /audio/{jobId}.{ext}      -> audio file
+
+Requests are limited to six-hour videos, 5000 non-empty segments, and valid
+timestamps. Incomplete translation output is rejected instead of being
+rendered as placeholder speech.
+
+Translation debug files are stored inside this project at
+`server/debug_transcripts/*.json`. The directory is ignored by Git. Files
+contain source cues, terminology, draft, reviewed, and final translations,
+but no API keys. Files older than
+`DEBUG_RETENTION_DAYS` (default: 7) are removed when a new debug file is saved.
+
+The extension may use a separate optional quality-review model for glossary and
+semantic review. Debug JSON records both the translation model and review model.
+
+## Checks
+
+```bash
+python -m unittest test_tts_engine.py
+python -m compileall -q .
+python -m pip check
 ```
 
-All routes require `X-API-Key` (see Auth above).
-
-## Verified
-
-- Real end-to-end jobs with gTTS: correct duration and format returned.
-- Auth tested live: missing/wrong key -> 401, correct key -> 200. `/docs`
-  and `/openapi.json` confirmed reachable without a key.
-- Server confirmed to refuse startup with no `API_KEY` set (real exit
-  code 1, correct error message, no encoding issues).
-- Public IP detection tested against the real `api.ipify.org`.
+Use `POST /api/preview` in Swagger to verify model loading and listen to each
+voice on the target machine.
 
 ## Known limitations
 
-- No installer, no bundled ffmpeg — Python and ffmpeg must be installed
-  manually.
-- No long-running stability testing (hours of continuous use, many jobs
-  back to back).
-- Voice quality not verified by ear in this environment — relies on the
-  official `gTTS` package as-is.
-- No systemd unit shipped for auto-restart on crash — see
-  [deploy/README.md](../deploy/README.md).
+- No bundled Python, ffmpeg, or offline model installer.
+- Voice quality varies by voice and technical vocabulary.
+- Job status is memory-only; final audio files do not have automatic TTL cleanup.
+- No long-running stability test has been completed yet.
+- No systemd unit is shipped; see [deploy/README.md](../deploy/README.md).
