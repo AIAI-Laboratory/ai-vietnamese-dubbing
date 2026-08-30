@@ -397,6 +397,22 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   }
 
   /**
+   * Glossary có thực sự dùng được không. Model đôi khi trả JSON hợp lệ nhưng
+   * rỗng ruột (subject "" và không mục nào) — parse không ném lỗi nên nếu
+   * không chốt ở đây thì cả bài giảng được dịch không có thuật ngữ nào, mà
+   * người dùng không biết vì sao lần này chất lượng khác lần trước.
+   */
+  function isUsableTerminology(terminology) {
+    return Boolean(
+      terminology
+      && typeof terminology.subject === 'string'
+      && terminology.subject.trim()
+      && Array.isArray(terminology.terms)
+      && terminology.terms.length > 0,
+    );
+  }
+
+  /**
    * Tốc độ đọc dùng cho lần sau, từ tốc độ server đo được của job vừa xong.
    * Làm tròn 0.1 vì rate nằm trong khoá cache: nhích vài phần nghìn mỗi lần
    * chạy sẽ khiến mọi bài đã lồng tiếng phải làm lại từ đầu.
@@ -432,6 +448,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   DUB.plan = {
     STRETCH_MIN, STRETCH_MAX, DEFAULT_RATE,
     countViSyllables, cuesToSentences, buildPlan, chunkSegments, nextCalibratedRate,
+    isUsableTerminology,
     buildTerminologySystemPrompt, buildTerminologyUserPrompt, buildTerminologyRetryUserPrompt,
     parseTerminologyResponse,
     buildTerminologyReviewSystemPrompt, buildTerminologyReviewUserPrompt,

@@ -260,6 +260,12 @@ async function analyzeTerminology(plan, settings) {
       700,
     );
     terminology = DUB.plan.parseTerminologyResponse(raw);
+    // JSON hợp lệ nhưng rỗng ruột không ném lỗi, nên phải tự bắt: đã gặp một
+    // lần chạy trả subject rỗng và 0 thuật ngữ cho đúng bài giảng mà lần
+    // trước ra 24 mục.
+    if (!DUB.plan.isUsableTerminology(terminology)) {
+      throw new Error('glossary rỗng (không có lĩnh vực hoặc không có thuật ngữ nào)');
+    }
   } catch (firstError) {
     const raw = await chatComplete(
       settings,
@@ -269,6 +275,9 @@ async function analyzeTerminology(plan, settings) {
     );
     try {
       terminology = DUB.plan.parseTerminologyResponse(raw);
+      if (!DUB.plan.isUsableTerminology(terminology)) {
+        throw new Error('glossary vẫn rỗng ở lần thử lại');
+      }
     } catch (secondError) {
       throw new Error(`Glossary không hợp lệ sau 2 lần thử: ${secondError.message}; lần đầu: ${firstError.message}`);
     }
@@ -446,6 +455,43 @@ async function compactOverflowTranslations(plan, translated, settings, terminolo
 }
 
 // ---------------------------------------------------------------------------
+// Glossary đã duyệt được giữ lại theo videoId: chạy lại cùng một bài giảng
+// (xoá cache, đổi giọng, đổi tốc độ đọc) phải ra đúng thuật ngữ như lần
+// trước, thay vì phụ thuộc việc model hôm nay trả về gì. Cũng tiết kiệm hai
+// lượt gọi Gemini mỗi lần chạy lại.
+// ---------------------------------------------------------------------------
+
+const GLOSSARY_CACHE_KEY = 'glossaryCache';
+const GLOSSARY_CACHE_MAX = 30;
+
+async function loadCachedGlossary(videoId) {
+  if (!videoId) return null;
+  try {
+    const stored = await chrome.storage.local.get(GLOSSARY_CACHE_KEY);
+    const entry = (stored[GLOSSARY_CACHE_KEY] || {})[videoId];
+    return entry && DUB.plan.isUsableTerminology(entry.terminology) ? entry.terminology : null;
+  } catch (error) {
+    console.warn('[dub] không đọc được glossary đã lưu:', error);
+    return null;
+  }
+}
+
+async function saveCachedGlossary(videoId, terminology) {
+  if (!videoId || !DUB.plan.isUsableTerminology(terminology)) return;
+  try {
+    const stored = await chrome.storage.local.get(GLOSSARY_CACHE_KEY);
+    const cache = { ...(stored[GLOSSARY_CACHE_KEY] || {}) };
+    cache[videoId] = { terminology, savedAt: Date.now() };
+    // Giữ kích thước có hạn: bỏ bản cũ nhất khi vượt ngưỡng.
+    const ids = Object.keys(cache).sort((a, b) => (cache[b].savedAt || 0) - (cache[a].savedAt || 0));
+    const trimmed = Object.fromEntries(ids.slice(0, GLOSSARY_CACHE_MAX).map((id) => [id, cache[id]]));
+    await chrome.storage.local.set({ [GLOSSARY_CACHE_KEY]: trimmed });
+  } catch (error) {
+    console.warn('[dub] không lưu được glossary:', error);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // TTS server local — hợp đồng API mô tả trong server/README.md.
 // ---------------------------------------------------------------------------
 
@@ -591,20 +637,33 @@ async function runJob(msg, port) {
   let terminologyError = '';
   let terminologyReviewError = '';
   post(port, 'PROGRESS', { stage: 'terminology', pct: 8, note: 'Đang phân tích lĩnh vực và thuật ngữ...' });
-  try {
-    terminologyDraft = await analyzeTerminology(plan, settings);
-    terminology = terminologyDraft;
-    post(port, 'PROGRESS', { stage: 'terminology', pct: 10, note: 'Đang kiểm định thuật ngữ chuyên ngành...' });
+  const cachedGlossary = await loadCachedGlossary(msg.videoId);
+  if (cachedGlossary) {
+    terminologyDraft = cachedGlossary;
+    terminology = cachedGlossary;
+    log(`thuật ngữ: dùng lại glossary đã lưu của bài này | ${terminology.terms.length} mục`);
+  } else {
     try {
-      terminology = await reviewTerminology(terminologyDraft, reviewerSettings);
+      terminologyDraft = await analyzeTerminology(plan, settings);
+      terminology = terminologyDraft;
+      post(port, 'PROGRESS', { stage: 'terminology', pct: 10, note: 'Đang kiểm định thuật ngữ chuyên ngành...' });
+      try {
+        terminology = await reviewTerminology(terminologyDraft, reviewerSettings);
+        if (!DUB.plan.isUsableTerminology(terminology)) {
+          // Bản kiểm định rỗng thì bản phân tích đầu vẫn tốt hơn là không có gì.
+          terminology = terminologyDraft;
+          throw new Error('bản kiểm định trả về glossary rỗng');
+        }
+      } catch (error) {
+        terminologyReviewError = error && error.message ? error.message : String(error);
+        console.warn('[dub] không kiểm định lại được glossary, dùng bản phân tích đầu:', error);
+      }
+      log(`thuật ngữ: lĩnh vực=${terminology.subject || '?'} | ${terminology.terms.length} mục`);
+      await saveCachedGlossary(msg.videoId, terminology);
     } catch (error) {
-      terminologyReviewError = error && error.message ? error.message : String(error);
-      console.warn('[dub] không kiểm định lại được glossary, dùng bản phân tích đầu:', error);
+      terminologyError = error && error.message ? error.message : String(error);
+      console.warn('[dub] không tạo được glossary riêng, dùng quy tắc nền:', error);
     }
-    log(`thuật ngữ: lĩnh vực=${terminology.subject || '?'} | ${terminology.terms.length} mục`);
-  } catch (error) {
-    terminologyError = error && error.message ? error.message : String(error);
-    console.warn('[dub] không tạo được glossary riêng, dùng quy tắc nền:', error);
   }
 
   post(port, 'PROGRESS', { stage: 'translate', pct: 12, note: `Đang dịch ${plan.segments.length} câu...` });

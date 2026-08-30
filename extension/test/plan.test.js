@@ -85,3 +85,19 @@ test('bỏ qua số đo vô lý thay vì phá cấu hình', () => {
 test('số đo trùng giá trị hiện tại không tạo thay đổi (không bust cache)', () => {
   assert.strictEqual(plan.nextCalibratedRate(3.8, 3.8), 3.8);
 });
+
+test('glossary rỗng ruột bị coi là không dùng được', () => {
+  const ok = { subject: 'Software Engineering', terms: [{ source: 'code smell', target: 'code smell', action: 'keep' }] };
+  assert.strictEqual(plan.isUsableTerminology(ok), true);
+  for (const bad of [
+    null,
+    undefined,
+    {},
+    { subject: '', terms: [] },
+    { subject: '   ', terms: [{ source: 'a', target: 'b' }] }, // lĩnh vực chỉ có khoảng trắng
+    { subject: 'Software Engineering', terms: [] },            // đúng ca đã gặp thật
+    { subject: 'Software Engineering' },
+  ]) {
+    assert.strictEqual(plan.isUsableTerminology(bad), false, `phải loại: ${JSON.stringify(bad)}`);
+  }
+});
