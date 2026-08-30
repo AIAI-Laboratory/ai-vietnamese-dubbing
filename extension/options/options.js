@@ -1,9 +1,9 @@
 /**
- * Trang Cài đặt — CHỈ cấu hình API dịch và giọng đọc (TTS server + giọng +
+ * Trang Cài đặt — CHỈ cấu hình Gemini API và giọng đọc (TTS server + giọng +
  * hiệu chỉnh đồng bộ). Âm lượng, phụ đề (song ngữ/vị trí/cỡ/màu) và cache
  * chỉnh trong popup icon extension — xem popup/popup.js — vì đó là những
  * thứ người dùng muốn đổi nhanh, không phải cấu hình một lần rồi để đó như
- * API key/model.
+ * Gemini API key.
  *
  * Lưu vào chrome.storage.local dưới key "settings". QUAN TRỌNG: settings là
  * MỘT object dùng chung với popup.js. save() ở đây phải đọc bản hiện có rồi
@@ -13,25 +13,20 @@
  * Chỉ hai lời gọi mạng: API dịch (mục 1, bắt buộc, người dùng tự cấu hình)
  * và TTS server local (mục 2, chạy trên chính máy này — xem server/README.md).
  *
- * Base URL API dịch là tuỳ người dùng nhập nên KHÔNG khai báo sẵn quyền cho
- * mọi origin trong manifest (sẽ rất rộng, đáng ngại lúc cài đặt). Thay vào
- * đó xin quyền đúng origin đó ngay khi bấm nút liên quan — chuẩn
- * optional_host_permissions của MV3.
+ * Gemini API dùng endpoint chính thức đã khai báo sẵn trong manifest; không
+ * cần xin optional_host_permissions hay nhập Base URL.
  */
 
 const DEFAULTS = {
-  apiBaseUrl: "https://api.openai.com/v1",
-  apiKey: "",
-  model: "",
-  sendSystemRole: true,
+  geminiApiKey: "",
   timeoutMs: 30000,
 
   serverUrl: "http://127.0.0.1:18765",
   serverApiKey: "",
   voice: "",
 
-  viSyllablesPerSec: 3.0,
-  planVersion: "v1",
+  viSyllablesPerSec: 2.6,
+  planVersion: "gemini-v2",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -89,7 +84,7 @@ applyTheme(currentThemeChoice());
 const TAB_META = {
   "tab-translate": {
     title: "Dịch",
-    sub: "Tương thích OpenAI — dùng được với OpenAI, Gemini, Groq hoặc endpoint riêng của bạn.",
+    sub: "Gemini API chính thức, chỉ cần một API key.",
   },
   "tab-voice": {
     title: "Giọng đọc",
@@ -115,39 +110,29 @@ document.querySelectorAll(".nav-item").forEach((b) => {
   b.addEventListener("click", () => switchTab(b.dataset.tab));
 });
 
-function currentConfig() {
+function currentGeminiConfig() {
   return {
-    baseUrl: $("apiBaseUrl").value.trim() || DEFAULTS.apiBaseUrl,
-    apiKey: $("apiKey").value.trim(),
-    model: $("model").value.trim(),
-    sendSystemRole: DEFAULTS.sendSystemRole,
+    geminiApiKey: $("geminiApiKey").value.trim(),
     timeoutMs: DEFAULTS.timeoutMs,
   };
-}
-
-function originPatternFor(urlStr) {
-  try {
-    const u = new URL(urlStr);
-    return u.protocol + "//" + u.hostname + "/*";
-  } catch (e) {
-    return null;
-  }
-}
-
-async function ensureOriginPermission(urlStr) {
-  const pattern = originPatternFor(urlStr);
-  if (!pattern) throw new Error("Base URL không hợp lệ");
-  const has = await chrome.permissions.contains({ origins: [pattern] });
-  if (has) return true;
-  return chrome.permissions.request({ origins: [pattern] });
 }
 
 async function load() {
   const stored = await chrome.storage.local.get("settings");
   const s = { ...DEFAULTS, ...(stored.settings || {}) };
-  $("apiBaseUrl").value = s.apiBaseUrl;
-  $("apiKey").value = s.apiKey;
-  $("model").value = s.model;
+  if (s.planVersion !== DEFAULTS.planVersion) {
+    s.planVersion = DEFAULTS.planVersion;
+    s.viSyllablesPerSec = DEFAULTS.viSyllablesPerSec;
+    if (s.voice === "vi") s.voice = "";
+  }
+  if (!s.geminiApiKey) s.geminiApiKey = "";
+  delete s.apiBaseUrl;
+  delete s.apiKey;
+  delete s.model;
+  delete s.reviewModel;
+  delete s.sendSystemRole;
+  await chrome.storage.local.set({ settings: s });
+  $("geminiApiKey").value = s.geminiApiKey;
 
   $("serverUrl").value = s.serverUrl;
   $("serverApiKey").value = s.serverApiKey || "";
@@ -171,10 +156,7 @@ async function save() {
   const stored = await chrome.storage.local.get("settings");
   const settings = {
     ...(stored.settings || {}),
-    apiBaseUrl: $("apiBaseUrl").value.trim() || DEFAULTS.apiBaseUrl,
-    apiKey: $("apiKey").value.trim(),
-    model: $("model").value.trim(),
-    sendSystemRole: DEFAULTS.sendSystemRole,
+    geminiApiKey: $("geminiApiKey").value.trim(),
     timeoutMs: DEFAULTS.timeoutMs,
 
     serverUrl: $("serverUrl").value.trim() || DEFAULTS.serverUrl,
@@ -185,6 +167,11 @@ async function save() {
       +$("viSyllablesPerSec").value || DEFAULTS.viSyllablesPerSec,
     planVersion: DEFAULTS.planVersion,
   };
+  delete settings.apiBaseUrl;
+  delete settings.apiKey;
+  delete settings.model;
+  delete settings.reviewModel;
+  delete settings.sendSystemRole;
   await chrome.storage.local.set({ settings });
   $("saveStatus").textContent = "Đã lưu.";
   $("saveStatus").className = "status ok";
@@ -197,71 +184,34 @@ function setStatus(el, text, ok) {
   el.textContent = text;
   el.className =
     el.className.replace(/\bok\b|\berr\b/g, "").trim() +
-    " " +
-    (ok ? "ok" : "err");
+    (ok === true ? " ok" : ok === false ? " err" : "");
 }
 
-async function onLoadModels() {
-  const cfg = currentConfig();
-  const status = $("apiStatus");
-  setStatus(status, "Đang xin quyền truy cập " + cfg.baseUrl + " ...", true);
-  const granted = await ensureOriginPermission(cfg.baseUrl).catch((e) => {
-    setStatus(status, "Lỗi quyền: " + e.message, false);
-    return false;
-  });
-  if (!granted) {
-    setStatus(status, "Cần cấp quyền để gọi API này.", false);
-    return;
-  }
-
-  setStatus(status, "Đang tải danh sách model...", true);
-  const res = await chrome.runtime.sendMessage({
-    type: "FETCH_MODELS",
-    config: cfg,
-  });
-  if (!res.ok) {
-    setStatus(status, "Lỗi: " + res.error, false);
-    return;
-  }
-
-  const sel = $("modelList");
-  sel.innerHTML = '<option value="">— chọn model —</option>';
-  res.models.forEach((id) => {
-    const opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = id;
-    sel.appendChild(opt);
-  });
-  setStatus(status, `Tải được ${res.models.length} model.`, true);
-}
-
-async function onTestModel() {
-  const cfg = currentConfig();
-  if (!cfg.model) {
-    setStatus($("apiStatus"), "Chưa nhập tên model.", false);
+async function onTestGemini() {
+  const cfg = currentGeminiConfig();
+  if (!cfg.geminiApiKey) {
+    setStatus($("apiStatus"), "Chưa nhập Gemini API key.", false);
     return;
   }
   const status = $("apiStatus");
-  setStatus(status, "Đang xin quyền...", true);
-  const granted = await ensureOriginPermission(cfg.baseUrl).catch((e) => {
-    setStatus(status, "Lỗi quyền: " + e.message, false);
-    return false;
-  });
-  if (!granted) {
-    setStatus(status, "Cần cấp quyền để gọi API này.", false);
-    return;
+  const button = $("btnTestGemini");
+  button.disabled = true;
+  setStatus(status, "Đang kiểm tra Gemini API key...", null);
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: "TEST_GEMINI",
+      config: cfg,
+    });
+    if (!res || !res.ok) {
+      setStatus(status, "Lỗi: " + ((res && res.error) || "Không nhận được phản hồi"), false);
+    } else {
+      setStatus(status, `Sẵn sàng — ${res.model}.`, true);
+    }
+  } catch (error) {
+    setStatus(status, "Lỗi mạng: " + (error.message || String(error)), false);
+  } finally {
+    button.disabled = false;
   }
-
-  setStatus(status, "Đang gọi model...", true);
-  const res = await chrome.runtime.sendMessage({
-    type: "TEST_MODEL",
-    config: cfg,
-  });
-  if (!res.ok) {
-    setStatus(status, "Lỗi: " + res.error, false);
-    return;
-  }
-  setStatus(status, 'OK — model trả lời: "' + res.reply + '"', true);
 }
 
 async function onCheckServer() {
@@ -307,10 +257,7 @@ async function onCheckServer() {
     );
     return;
   }
-  const mockNote = d.mock
-    ? " — CHẾ ĐỘ MOCK (âm thanh giả để test luồng, chưa phải giọng thật)"
-    : "";
-  setStatus(status, `Sẵn sàng — model: ${d.model || "?"}${mockNote}`, !d.mock);
+  setStatus(status, `Sẵn sàng — model: ${d.model || "?"}`, true);
 }
 
 async function onLoadVoices() {
@@ -394,13 +341,9 @@ async function onPreviewVoice() {
 }
 
 $("btnSave").addEventListener("click", save);
-$("btnLoadModels").addEventListener("click", onLoadModels);
-$("btnTestModel").addEventListener("click", onTestModel);
+$("btnTestGemini").addEventListener("click", onTestGemini);
 $("btnCheckServer").addEventListener("click", onCheckServer);
 $("btnLoadVoices").addEventListener("click", onLoadVoices);
 $("btnPreviewVoice").addEventListener("click", onPreviewVoice);
-$("modelList").addEventListener("change", (e) => {
-  if (e.target.value) $("model").value = e.target.value;
-});
 
 load();
