@@ -21,8 +21,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.coursera.org/learn/*",
-        "https://www.youtube.com/watch*"
+        "https://www.coursera.org/*",
+        "https://www.youtube.com/*"
       ],
       "js": [
         "lib/vtt.js",

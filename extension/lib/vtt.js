@@ -94,7 +94,17 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
    * đoán mò timestamp từ nguồn không đáng tin.
    */
   async function getEnglishCues(video) {
-    return (await fetchTrackCues(video)) || (await readLiveTextTrackCues(video));
+    const fromTrack = await fetchTrackCues(video);
+    if (fromTrack) {
+      console.log(`[LDUB] phụ đề lấy từ <track> src: ${fromTrack.length} cue`);
+      return fromTrack;
+    }
+    console.log('[LDUB] không có <track> dùng được, thử video.textTracks...');
+    const live = await readLiveTextTrackCues(video);
+    console.log(live
+      ? `[LDUB] phụ đề lấy từ textTracks: ${live.length} cue`
+      : '[LDUB] textTracks cũng không có cue nào');
+    return live;
   }
 
   DUB.vtt = { parseVtt, findEnglishTrackEl, fetchTrackCues, readLiveTextTrackCues, getEnglishCues, stripTags };

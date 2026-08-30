@@ -88,6 +88,35 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const VI_MARKS = /[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const log = (...args) => console.log("[LDUB]", ...args);
+  const warn = (...args) => console.warn("[LDUB]", ...args);
+
+  /**
+   * Kiểm tra nhanh xem DOM của YouTube có đúng thứ adapter đang tìm không.
+   * Gọi trong console: __LDUB.probe(). Đây là chỗ hỏng đầu tiên mỗi khi
+   * YouTube đổi cấu trúc trang, nên phải xem được mà không cần sửa code.
+   */
+  function probeTranscriptUI() {
+    const report = {
+      url: location.href,
+      segments: document.querySelectorAll(TRANSCRIPT_SEGMENT).length,
+      descriptionExpander: Boolean(document.querySelector('#description-inline-expander')),
+      expandButton: Boolean(document.querySelector('#description-inline-expander #expand')),
+      buttons: {},
+      nutCoChuTranscript: [],
+    };
+    for (const selector of TRANSCRIPT_BUTTON) {
+      report.buttons[selector] = document.querySelectorAll(selector).length;
+    }
+    // Liệt kê mọi nút có nhãn nghi là transcript, để biết YouTube đang gọi nó là gì.
+    for (const el of document.querySelectorAll('button, [role="button"], tp-yt-paper-button')) {
+      const label = `${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`.trim();
+      if (/transcript|lời thoại|bản chép|phụ đề/i.test(label)) {
+        report.nutCoChuTranscript.push(label.slice(0, 60));
+      }
+    }
+    return report;
+  }
 
   /** "1:02" -> 62; "1:02:03" -> 3723. Trả null nếu không phải mốc thời gian. */
   function parseClockTime(text) {
@@ -133,36 +162,55 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
   /** Bấm nút mở bảng transcript nếu nó chưa mở. */
   function openTranscriptPanel() {
-    if (document.querySelector(TRANSCRIPT_SEGMENT)) return true;
+    if (document.querySelector(TRANSCRIPT_SEGMENT)) {
+      log("bảng transcript đã mở sẵn");
+      return true;
+    }
     // Phần mô tả phải mở rộng thì nút transcript mới được render.
     const expand = document.querySelector('#description-inline-expander #expand');
-    if (expand) expand.click();
+    if (expand) {
+      log("mở rộng phần mô tả video để lộ nút transcript");
+      expand.click();
+    } else {
+      log("không thấy nút mở rộng mô tả (#description-inline-expander #expand)");
+    }
     for (const selector of TRANSCRIPT_BUTTON) {
       const button = document.querySelector(selector);
       if (button) {
+        log(`bấm nút transcript khớp selector: ${selector} | nhãn: "${(button.getAttribute('aria-label') || button.textContent || '').trim().slice(0, 60)}"`);
         button.click();
         return true;
       }
+      log(`selector không khớp: ${selector}`);
     }
     return false;
   }
 
   async function readTranscriptPanel(video, timeoutMs = 8000) {
     if (!openTranscriptPanel()) {
-      console.warn('[LDUB] không tìm thấy nút mở bảng transcript của YouTube');
+      warn('không tìm thấy nút mở bảng transcript. Gõ __LDUB.probe() trong console để xem YouTube đang đặt tên nút là gì:',
+        probeTranscriptUI());
       return null;
     }
-    const deadline = Date.now() + timeoutMs;
+    const t0 = Date.now();
+    const deadline = t0 + timeoutMs;
     while (!document.querySelector(TRANSCRIPT_SEGMENT) && Date.now() < deadline) {
       await sleep(200);
     }
     const rows = readTranscriptRows();
-    if (!rows.length) return null;
+    log(`bảng transcript: ${rows.length} dòng sau ${Date.now() - t0}ms`);
+    if (!rows.length) {
+      warn('bảng mở nhưng không có dòng nào — có thể video không có phụ đề, hoặc selector đã đổi:',
+        probeTranscriptUI());
+      return null;
+    }
+    log('dòng đầu:', JSON.stringify(rows[0]), '| dòng cuối:', JSON.stringify(rows[rows.length - 1]));
 
     const cues = segmentsToCues(rows, video && video.duration);
+    log(`chuyển thành ${cues.length} cue (bỏ ${rows.length - cues.length} dòng không parse được mốc thời gian)`);
     if (!cues.length) return null;
     if (looksVietnamese(cues)) {
-      console.warn('[LDUB] bảng transcript đang ở tiếng Việt — đổi sang English rồi thử lại');
+      warn('bảng transcript đang ở tiếng Việt — mở menu ngôn ngữ trong bảng, chọn English rồi bấm lại');
       return null;
     }
     return cues;
@@ -176,5 +224,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   }
 
   // parseClockTime/segmentsToCues xuất ra để test được không cần DOM.
-  DUB.sites = { ADAPTERS, current, parseClockTime, segmentsToCues, looksVietnamese };
+  DUB.sites = {
+    ADAPTERS, current, parseClockTime, segmentsToCues, looksVietnamese, probeTranscriptUI,
+  };
 })();

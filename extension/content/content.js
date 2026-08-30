@@ -11,7 +11,25 @@
  * luôn đúng ngay lập tức dù tua tới đâu, không cần buffer.
  */
 (function () {
-  console.log("[LDUB] content script đã nạp trên", location.href);
+  // -------------------------------------------------------------------------
+  // Log chẩn đoán. Xem ở DevTools console, chọn context của extension trong
+  // ô dropdown "top" (content script chạy ở isolated world, mặc định console
+  // chỉ hiện log của trang). Mọi log đều mang tiền tố [LDUB].
+  //
+  // Trong console gõ __LDUB.dump() để xem trạng thái hiện tại, hoặc
+  // __LDUB.probe() để kiểm tra riêng phần DOM của YouTube.
+  // -------------------------------------------------------------------------
+  const log = (...args) => console.log("[LDUB]", ...args);
+  const warn = (...args) => console.warn("[LDUB]", ...args);
+  const seenOnce = new Set();
+  /** Log một lần cho mỗi khoá — vòng lặp init chạy mỗi giây, đừng spam. */
+  function logOnce(key, ...args) {
+    if (seenOnce.has(key)) return;
+    seenOnce.add(key);
+    log(...args);
+  }
+
+  log("content script nạp lúc", new Date().toISOString(), "|", location.href);
 
   // SVG nhúng thẳng (không dùng sprite <symbol> dùng chung như trang Cài đặt)
   // — tiêm sprite id cố định vào DOM của Coursera dễ đụng id trùng với chính
@@ -77,8 +95,25 @@
   let duckTimer = null;
   const previewAudioCache = new Map(); // voice -> {base64, mime} — nghe lại không tổng hợp lại
 
-  // Adapter của trang đang mở; null nghĩa là extension không chạy ở đây.
-  const site = DUB.sites.current();
+  // Adapter của trang đang mở. KHÔNG chốt một lần lúc nạp: content script chỉ
+  // được Chrome tiêm khi tải trang, còn YouTube/Coursera điều hướng kiểu SPA —
+  // vào trang chủ rồi bấm vào video thì URL đổi mà script vẫn là script cũ.
+  // Vì vậy manifest khớp cả site, và adapter được tính lại mỗi lần URL đổi.
+  let site = null;
+  if (!DUB.sites) {
+    warn("lib/sites.js CHƯA nạp — kiểm tra content_scripts.js trong manifest.json");
+  }
+
+  function refreshSite() {
+    const next = DUB.sites && DUB.sites.current ? DUB.sites.current() : null;
+    if (next === site) return;
+    site = next;
+    if (site) {
+      log("adapter:", site.id, "| videoId:", site.videoId());
+    } else {
+      log("URL này không phải trang xem video, extension đứng yên:", location.href);
+    }
+  }
 
   function videoIdFromUrl() {
     return site ? `${site.id}::${site.videoId()}` : location.pathname;
@@ -120,7 +155,14 @@
 
   function findVideo() {
     const vids = [...document.querySelectorAll("video")];
-    return vids.find((v) => v.duration > 0) || vids[0] || null;
+    const chosen = vids.find((v) => v.duration > 0) || vids[0] || null;
+    if (!chosen) {
+      logOnce("no-video", "chưa thấy thẻ <video> nào trên trang, sẽ thử lại mỗi giây");
+    } else if (!chosen.duration) {
+      logOnce("video-no-duration",
+        `thấy ${vids.length} thẻ <video> nhưng chưa cái nào có duration (readyState=${chosen.readyState})`);
+    }
+    return chosen;
   }
 
   function teardown() {
@@ -168,8 +210,11 @@
     }
   }
 
-  let lastPath = "";
+  // Khởi tạo bằng URL hiện tại: để rỗng thì tick đầu tiên tưởng là vừa đổi
+  // trang và dọn sạch overlay vừa gắn xong.
+  let lastPath = location.pathname + location.search;
   function watchNavigation() {
+    refreshSite();
     setInterval(() => {
       // Trang là SPA — <video> có thể render SAU thời điểm content script
       // chạy (document_idle), nên phải thử lại đều đặn, không chỉ khi URL
@@ -178,26 +223,37 @@
       const here = location.pathname + location.search;
       if (here !== lastPath) {
         lastPath = here;
+        log("URL đổi ->", here);
         teardown();
+        refreshSite();
       }
       init();
     }, 1000);
   }
 
   async function init() {
+    if (!site) return; // refreshSite đã log lý do
+
     const v = findVideo();
     if (!v || v === video) return; // chưa có video, hoặc đã gắn overlay cho đúng video này rồi
     video = v;
-    console.log("[LDUB] tìm thấy <video>, đang gắn nút Dub...", v);
+    log(`tìm thấy <video> ${v.videoWidth}x${v.videoHeight}, dài ${v.duration}s — đang gắn nút Dub`);
     try {
       await loadSettings();
+      log("cài đặt:", {
+        server: settings.serverUrl,
+        coServerApiKey: Boolean(settings.serverApiKey),
+        voice: settings.voice || "(mặc định)",
+        viSyllablesPerSec: settings.viSyllablesPerSec,
+        bedVolume: settings.bedVolume,
+      });
     } catch (error) {
       console.error("[LDUB] không nạp được cài đặt extension:", error);
       video = null;
       return;
     }
     injectOverlay();
-    console.log("[LDUB] đã gắn nút Dub xong.");
+    log("đã gắn nút Dub:", dubBtn ? "OK" : "THẤT BẠI (dubBtn rỗng)");
   }
 
   // -------------------------------------------------------------------------
@@ -492,7 +548,12 @@
         return;
       }
 
+      log(`đang đọc phụ đề qua adapter "${site.id}"...`);
+      const tCues = Date.now();
       const cues = await site.getCues(video);
+      log(`đọc phụ đề xong sau ${Date.now() - tCues}ms:`,
+        cues ? `${cues.length} cue` : "KHÔNG CÓ",
+        cues && cues.length ? `| cue đầu: ${JSON.stringify(cues[0])}` : "");
       if (!cues || !cues.length) {
         setPanel(
           0,
@@ -630,6 +691,31 @@
       duckTimer = null;
     }
   }
+
+  // Cho phép gõ __LDUB.dump() / __LDUB.probe() trong console (isolated world).
+  globalThis.__LDUB = {
+    dump() {
+      const state = {
+        url: location.href,
+        adapter: site ? site.id : null,
+        video: video ? { duration: video.duration, paused: video.paused, readyState: video.readyState } : null,
+        overlay: Boolean(overlay),
+        dubBtn: dubBtn ? dubBtn.className : null,
+        state: currentState,
+        mode,
+        cues: currentSubtitles ? currentSubtitles.length : 0,
+        duckEnvelope: duckEnv ? `${duckEnv.length} mẫu @ ${duckFps}fps` : null,
+        settings,
+      };
+      log("trạng thái:", state);
+      return state;
+    },
+    probe() {
+      const result = DUB.sites.probeTranscriptUI ? DUB.sites.probeTranscriptUI() : "adapter không hỗ trợ";
+      log("probe DOM:", result);
+      return result;
+    },
+  };
 
   function base64ToBlob(base64, mime) {
     const binary = atob(base64);
