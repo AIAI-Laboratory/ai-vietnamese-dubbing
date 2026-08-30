@@ -14,6 +14,9 @@ from pathlib import Path
 logger = logging.getLogger("tts_engine")
 
 SAMPLE_RATE = 24000
+# Trần tốc độ đọc. Kokoro nhận speed native (đổi prosody thật, khác hẳn kéo
+# giãn tín hiệu sau khi tổng hợp), nhưng qua ngưỡng này thì nghe hối hả.
+SPEED_MAX = 1.15
 MODEL_REVISION = "9f210d622209fcc216fe2ac6159fed2ff381cb8a"
 
 # vig2p đọc acronym tiếng Anh không ổn định. Chuẩn hoá những thuật ngữ xuất
@@ -75,6 +78,7 @@ def count_vi_syllables(text: str) -> int:
 class SynthResult:
     wav_path: Path
     duration_sec: float
+    speed: float = 1.0
 
 
 class KokoroOnnxEngine:
@@ -175,7 +179,9 @@ class KokoroOnnxEngine:
         self._voicepacks[voice] = voicepack
         return voicepack
 
-    def synth(self, text: str, out_path: Path, voice: str = "") -> SynthResult:
+    def synth(
+        self, text: str, out_path: Path, voice: str = "", speed: float = 1.0
+    ) -> SynthResult:
         """Tổng hợp một segment thành WAV mono PCM 16-bit."""
 
         spoken_text = normalize_for_speech(text)
@@ -183,9 +189,10 @@ class KokoroOnnxEngine:
             raise ValueError("Văn bản TTS không được để trống")
 
         voice_name = self._resolve_voice(voice)
+        speed = min(max(float(speed), 1.0), SPEED_MAX)
         with self._lock:
             self._runtime.voicepack = self._load_voicepack(voice_name)
-            audio, _ = self._runtime.synthesize(spoken_text)
+            audio, _ = self._runtime.synthesize(spoken_text, speed=speed)
 
         audio = self._np.asarray(audio, dtype=self._np.float32).reshape(-1)
         if len(audio) == 0 or not self._np.isfinite(audio).all():
@@ -197,7 +204,7 @@ class KokoroOnnxEngine:
             wav.setsampwidth(2)
             wav.setframerate(self.sample_rate)
             wav.writeframes(pcm)
-        return SynthResult(out_path, len(audio) / self.sample_rate)
+        return SynthResult(out_path, len(audio) / self.sample_rate, speed)
 
 
 def load_engine() -> KokoroOnnxEngine:

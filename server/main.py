@@ -364,14 +364,26 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         segment_wavs = []
         meta = []
         t_synth_total = 0.0
+        slots = audio_pipeline.available_slots(
+            [{"id": s.id, "start": s.start, "end": s.end} for s in req.segments],
+            req.durationSec,
+        )
         for i, seg in enumerate(req.segments):
             raw_wav = job_dir / f"{seg.id:04d}_raw.wav"
             fit_wav = job_dir / f"{seg.id:04d}_fit.wav"
             text = seg.vi.strip()
             syllables = tts_engine.count_vi_syllables(text)
+            slot_sec = slots[seg.id]
 
             t0 = time.time()
             result = ENGINE.synth(text, raw_wav, voice=req.voice)
+            base_sec = result.duration_sec
+            # Vượt khe: đọc lại nhanh hơn bằng tốc độ native — prosody vẫn tự
+            # nhiên, hơn hẳn kéo giãn tín hiệu bằng atempo ở bước sau.
+            if base_sec > slot_sec + 0.02:
+                result = ENGINE.synth(
+                    text, raw_wav, voice=req.voice, speed=base_sec / slot_sec
+                )
             t_synth = time.time() - t0
             t_synth_total += t_synth
 
@@ -379,16 +391,20 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
                 raw_wav,
                 fit_wav,
                 result.duration_sec,
-                max(0.05, seg.end - seg.start),
+                slot_sec,
             )
             raw_wav.unlink(missing_ok=True)
-            info.update(id=seg.id, syllables=syllables)
+            # baseSec = độ dài lúc đọc tốc độ thường; measuredSyllablesPerSec
+            # phải tính trên nó, không phải trên bản đã tăng tốc.
+            info.update(
+                id=seg.id, syllables=syllables, speed=result.speed, baseSec=round(base_sec, 3)
+            )
             meta.append(info)
             segment_wavs.append(({"start": seg.start, "end": seg.end}, fit_wav))
 
             eta = (t_synth_total / (i + 1)) * (total - i - 1)
-            logger.info("%s [%3d/%d] id=%-4d %2d âm tiết | synth %5.2fs -> %5.2fs audio | khe %5.2fs | nén %.2fx%s | còn ~%s",
-                        tag, i + 1, total, seg.id, syllables, t_synth, info["naturalSec"], info["slotSec"], info["stretch"],
+            logger.info("%s [%3d/%d] id=%-4d %2d âm tiết | synth %5.2fs -> %5.2fs audio | khe %5.2fs | speed %.2fx | nén %.2fx%s | còn ~%s",
+                        tag, i + 1, total, seg.id, syllables, t_synth, info["naturalSec"], info["slotSec"], info["speed"], info["stretch"],
                         " | CẮT BỚT" if info["overflowTruncated"] else "", _fmt_dur(eta))
             set_progress((i + 1) / total * 0.7, etaSec=round(eta, 1), doneSegments=i + 1, totalSegments=total)
 
@@ -404,7 +420,7 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         ext = "opus" if content_type == "audio/opus" else "mp3"
         logger.info("%s encode -> %s (%s) sau %.2fs — %.1f KB", tag, ext, content_type, time.time() - t0, final_path.stat().st_size / 1024)
 
-        rates = [m["syllables"] / m["naturalSec"] for m in meta if m["naturalSec"] > 0]
+        rates = [m["syllables"] / m["baseSec"] for m in meta if m["baseSec"] > 0]
         measured_rate = round(statistics.median(rates), 3) if rates else None
         overflow = [m["id"] for m in meta if m["overflowTruncated"]]
 

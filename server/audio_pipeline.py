@@ -2,14 +2,19 @@
 Ghép các câu đã tổng hợp thành MỘT file audio dài bằng video, mỗi câu neo
 đúng vị trí tuyệt đối [start, end] lấy từ timestamp phụ đề gốc.
 
+Khe của một câu KHÔNG phải [start,end] của phụ đề mà kéo dài tới sát câu
+kế tiếp (available_slots): khoảng lặng giữa hai câu vốn không ai đọc, cho
+câu trước mượn thì phần lớn câu dài hết vượt mà không phải nén hay cắt.
+
 Quy tắc mỗi câu:
   1. Tổng hợp giọng ở tốc độ tự nhiên.
-  2. Nếu dài hơn khe [start,end]: nén bằng ffmpeg atempo, giữ nguyên cao độ,
-     tối đa 1.10x (vượt quá giọng méo, nghe khó chịu).
-  3. Nén hết mức vẫn chưa vừa: CẮT audio cho vừa khe (fallback an toàn cuối
+  2. Dài hơn khe: đọc lại bằng tốc độ native của engine (prosody thật, không
+     phải kéo giãn tín hiệu) — xem tts_engine.SPEED_MAX.
+  3. Vẫn dư chút: nén bằng ffmpeg atempo, giữ nguyên cao độ, tối đa 1.10x.
+  4. Nén hết mức vẫn chưa vừa: CẮT audio cho vừa khe (fallback an toàn cuối
      cùng, đổi lấy việc không bao giờ đè vào câu kế tiếp) — đánh dấu
      "overflowTruncated": true để báo cho người dùng biết câu nào bị cắt.
-  4. Ngắn hơn khe: giữ nguyên tốc độ tự nhiên, phần còn lại là im lặng.
+  5. Ngắn hơn khe: giữ nguyên tốc độ tự nhiên, phần còn lại là im lặng.
 
 Cần ffmpeg trong PATH.
 """
@@ -22,6 +27,25 @@ from pathlib import Path
 
 STRETCH_MAX = 1.10
 SAMPLE_RATE = 24000
+# Khoảng thở chừa lại trước câu kế khi mượn khoảng lặng — hết sạch thì hai
+# câu dính liền nhau, nghe hụt hơi.
+BORROW_GAP_SEC = 0.08
+
+
+def available_slots(segments: list[dict], duration_sec: float) -> dict[int, float]:
+    """Khe thật của từng câu: [start, start câu kế) trừ một khoảng thở.
+
+    Không bao giờ ngắn hơn [start,end] gốc — chỉ nới rộng, nên hành vi với
+    phụ đề chồng lấn giữ nguyên như trước.
+    """
+
+    ordered = sorted(segments, key=lambda seg: seg["start"])
+    slots: dict[int, float] = {}
+    for i, seg in enumerate(ordered):
+        limit = ordered[i + 1]["start"] if i + 1 < len(ordered) else duration_sec
+        borrowed = min(limit, duration_sec) - BORROW_GAP_SEC - seg["start"]
+        slots[seg["id"]] = max(0.05, seg["end"] - seg["start"], borrowed)
+    return slots
 
 
 def _run_ffmpeg(args: list[str]) -> None:
