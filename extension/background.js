@@ -37,7 +37,12 @@ const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
-const TRANSLATE_MAX_TOKENS = 2400;
+// Trần token đầu ra cho một chunk dịch. 2400 là mức của thời viSyllablesPerSec
+// còn 2.6; sau khi hạn mức âm tiết tăng ~46%, chunk 25 câu vượt trần và Gemini
+// cắt cụt phần đuôi — biểu hiện đúng như đã gặp: nhận 17/25 câu, thiếu id
+// 18-25. Đây là trần chứ không phải mục tiêu nên nâng lên không tốn thêm gì
+// khi bản dịch ngắn.
+const TRANSLATE_MAX_TOKENS = 8192;
 const TRANSLATE_CHUNK_SIZE = 25;
 // Tuần tự để tương thích các gói có TPM thấp; mỗi request vẫn hoàn tất nhanh.
 const TRANSLATE_CONCURRENCY = 1;
@@ -121,6 +126,12 @@ function responsePreview(raw) {
   return String(raw).slice(0, 4000);
 }
 
+/** MAX_TOKENS nghĩa là câu trả lời bị cắt giữa chừng, không phải model trả thiếu. */
+function geminiFinishReason(payload) {
+  const candidate = payload && payload.candidates && payload.candidates[0];
+  return candidate && candidate.finishReason ? candidate.finishReason : '';
+}
+
 function geminiText(payload) {
   const candidate = payload.candidates && payload.candidates[0];
   const parts = candidate && candidate.content && candidate.content.parts;
@@ -186,6 +197,11 @@ async function chatComplete({ geminiApiKey, timeoutMs }, systemPrompt, userPromp
           });
         }
         throw new Error('API dịch báo lỗi: ' + payload.error.message);
+      }
+      const finishReason = geminiFinishReason(payload);
+      if (finishReason && finishReason !== 'STOP') {
+        console.warn(`[dub] Gemini dừng vì ${finishReason}` +
+          (finishReason === 'MAX_TOKENS' ? ` — phản hồi bị cắt, trần đang là ${maxTokens} token` : ''));
       }
       const content = geminiText(payload);
       if (typeof content !== 'string' || !content.length) {
@@ -299,6 +315,40 @@ async function reviewTerminology(terminology, settings) {
   return DUB.plan.parseTerminologyResponse(raw);
 }
 
+/**
+ * Dịch lại riêng những câu chunk vừa rồi bỏ sót. Thiếu một câu là hỏng cả
+ * job (server bắt buộc mọi segment phải có bản dịch), mà nguyên nhân thường
+ * chỉ là phản hồi bị cắt ở đuôi — hỏi lại đúng phần thiếu thì rẻ hơn nhiều
+ * so với bỏ toàn bộ công đã dịch.
+ */
+async function fillMissingSentences(segments, parsed, settings, system, chunkNumber, attempts = 2) {
+  let filled = parsed;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const missing = segments.filter((seg) => !filled.some((row) => row.id === seg.id));
+    if (!missing.length) return filled;
+    console.warn(`[dub] chunk ${chunkNumber} thiếu ${missing.length} câu (id: ${missing.map((s) => s.id).join(', ')}) — dịch lại lần ${attempt}`);
+    const rows = missing.map((seg) => ({ ...seg, __rate: settings.viSyllablesPerSec }));
+    let retry = [];
+    try {
+      const raw = await chatComplete(
+        settings,
+        system,
+        DUB.plan.buildTranslateUserPrompt(rows),
+        outputTokenBudget(rows, 600),
+      );
+      retry = DUB.plan.parseTranslationResponse(raw);
+    } catch (error) {
+      console.warn(`[dub] chunk ${chunkNumber} dịch lại lần ${attempt} lỗi:`, error);
+      continue;
+    }
+    const wanted = new Set(missing.map((seg) => seg.id));
+    const added = retry.filter((row) => wanted.has(row.id) && row.vi && row.vi.trim());
+    log(`chunk ${chunkNumber} dịch lại lần ${attempt}: bù được ${added.length}/${missing.length} câu`);
+    filled = filled.concat(added);
+  }
+  return filled;
+}
+
 async function translatePlan(plan, settings, terminology, onProgress) {
   const system = DUB.plan.buildTranslateSystemPrompt(settings.viSyllablesPerSec, terminology);
   const chunks = DUB.plan.chunkSegments(plan.segments, TRANSLATE_CHUNK_SIZE);
@@ -319,14 +369,11 @@ async function translatePlan(plan, settings, terminology, onProgress) {
       const t = Date.now();
       log(`chunk ${i + 1}/${chunks.length} gửi đi — ${segs.length} câu, ${user.length} ký tự`);
       const raw = await chatComplete(settings, system, user, outputTokenBudget(segs, 600));
-      const parsed = DUB.plan.parseTranslationResponse(raw);
+      let parsed = DUB.plan.parseTranslationResponse(raw);
+      log(`chunk ${i + 1}/${chunks.length} xong sau ${Date.now() - t}ms — nhận ${parsed.length}/${segs.length} câu`);
+      parsed = await fillMissingSentences(chunks[i], parsed, settings, system, i + 1);
       results[i] = parsed;
       doneCount += parsed.length;
-      log(`chunk ${i + 1}/${chunks.length} xong sau ${Date.now() - t}ms — nhận ${parsed.length}/${segs.length} câu`);
-      if (parsed.length < segs.length) {
-        const missing = segs.map((g) => g.id).filter((id) => !parsed.some((r) => r.id === id));
-        console.warn(`[dub] chunk ${i + 1} thiếu ${missing.length} câu — id:`, missing);
-      }
       if (onProgress) onProgress(doneCount, plan.segments.length);
     }
   }
