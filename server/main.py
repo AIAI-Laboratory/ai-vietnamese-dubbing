@@ -4,7 +4,7 @@ KHÔNG có UI/dashboard. Swagger UI tự sinh sẵn tại GET /docs — bấm n�
 "Authorize" (góc trên phải), dán X-API-Key, mọi request "Try it out" tự
 gắn kèm.
 
-  GET  /api/health              -> {"ok","status":"loading"|"ready"|"error","model","mock","error"}
+  GET  /api/health              -> {"ok","status":"loading"|"ready"|"error","model","error"}
   GET  /api/voices              -> {"voices":[{"id","label"}]} (503 nếu đang loading)
   POST /api/preview             body {text,voice} -> file WAV
   POST /api/synthesize          body {voice,durationSec,segments:[{id,start,end,vi}]} -> {"jobId"}
@@ -13,15 +13,16 @@ gắn kèm.
 
 TOÀN BỘ route trên khoá bằng header X-API-Key (xem auth.py) — BẮT BUỘC,
 không có kiểu "để trống = không khoá": server chỉ chạy qua API nên nếu
-không auth thì ai biết địa chỉ cũng gọi được, tốn quota gTTS/CPU. Server
+không auth thì ai biết địa chỉ cũng gọi được, tốn CPU. Server
 từ chối khởi động luôn nếu chưa đặt API_KEY trong server/.env.
 
-Vẫn cần ffmpeg trong PATH (giải mã MP3 từ gTTS, nén vừa khe, xuất Opus/MP3).
+Vẫn cần ffmpeg trong PATH để nén audio vừa khe và xuất Opus/MP3.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import platform
@@ -31,6 +32,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -48,15 +50,19 @@ if sys.platform == "win32":
 
 from dotenv import load_dotenv
 
+SERVER_DIR = Path(__file__).resolve().parent
+
 # Nạp server/.env TRƯỚC khi import auth.py — auth.py đọc API_KEY từ
 # os.environ ngay lúc import (module-level, và tự sys.exit nếu rỗng), load
 # muộn hơn sẽ không kịp.
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(SERVER_DIR / ".env")
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 import audio_pipeline
 import tts_engine
@@ -65,6 +71,8 @@ from auth import require_api_key
 WORK_DIR = Path(tempfile.gettempdir()) / "local-ai-vi-dub"
 WORK_DIR.mkdir(exist_ok=True)
 LOG_PATH = WORK_DIR / "server.log"
+DEBUG_DIR = SERVER_DIR / "debug_transcripts"
+DEBUG_RETENTION_DAYS = max(1, int(os.environ.get("DEBUG_RETENTION_DAYS", "7")))
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -84,32 +92,78 @@ def _fmt_dur(sec: float) -> str:
 app = FastAPI(
     title="Local AI Vietnamese Dubbing — TTS server",
     description="Chỉ API — dán API key vào nút Authorize phía trên để thử.",
-    dependencies=[Depends(require_api_key)],  # áp cho MỌI route, khỏi lặp lại từng cái
+    dependencies=[Depends(require_api_key)],
 )
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 ENGINE = None
 ENGINE_ERROR: str | None = None
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
+JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kokoro-job")
 
 
 class Segment(BaseModel):
     id: int
-    start: float
-    end: float
-    vi: str
+    start: float = Field(ge=0, le=21600)
+    end: float = Field(gt=0, le=21600)
+    vi: str = Field(min_length=1, max_length=2000)
 
 
 class SynthesizeRequest(BaseModel):
-    voice: str = ""
-    durationSec: float
-    segments: list[Segment]
+    voice: str = Field(default="", max_length=64)
+    durationSec: float = Field(gt=0, le=21600)
+    segments: list[Segment] = Field(min_length=1, max_length=5000)
 
 
 class PreviewRequest(BaseModel):
-    text: str = "Xin chào, đây là giọng đọc thử."
-    voice: str = ""
+    text: str = Field(default="Xin chào, đây là giọng đọc thử.", max_length=2000)
+    voice: str = Field(default="", max_length=64)
+
+
+class DebugTranscriptRequest(BaseModel):
+    videoId: str = Field(min_length=1, max_length=1000)
+    model: str = Field(default="", max_length=300)
+    reviewModel: str = Field(default="", max_length=300)
+    apiBaseUrl: str = Field(default="", max_length=1000)
+    durationSec: float = Field(gt=0, le=21600)
+    planVersion: str = Field(default="", max_length=100)
+    viSyllablesPerSec: float = Field(gt=0, le=20)
+    sourceCues: list[dict] = Field(default_factory=list, max_length=10000)
+    plan: dict = Field(default_factory=dict)
+    terminologyDraft: dict = Field(default_factory=dict)
+    terminology: dict = Field(default_factory=dict)
+    terminologyError: str = Field(default="", max_length=4000)
+    terminologyReviewError: str = Field(default="", max_length=4000)
+    draftTranslation: list[dict] = Field(default_factory=list, max_length=5000)
+    reviewedTranslation: list[dict] = Field(default_factory=list, max_length=5000)
+    finalTranslation: list[dict] = Field(default_factory=list, max_length=5000)
+    verification: dict = Field(default_factory=dict)
+
+
+def _write_debug_transcript(data: dict, directory: Path = DEBUG_DIR) -> Path:
+    """Ghi debug JSON và xoá các bản quá hạn trong cùng thư mục."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    cutoff = now - DEBUG_RETENTION_DAYS * 86400
+    for old_path in directory.glob("*.json"):
+        try:
+            if old_path.stat().st_mtime < cutoff:
+                old_path.unlink()
+        except OSError:
+            logger.warning("Không dọn được debug file cũ: %s", old_path)
+
+    filename = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    path = directory / f"{filename}-{uuid.uuid4().hex[:8]}.json"
+    payload = {"savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), **data}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 @app.get("/api/health")
@@ -118,22 +172,31 @@ def health():
         return {"ok": False, "status": "error", "error": ENGINE_ERROR}
     if ENGINE is None:
         return {"ok": True, "status": "loading"}
-    return {"ok": True, "status": "ready", "model": ENGINE.name, "mock": ENGINE.is_mock}
+    return {"ok": True, "status": "ready", "model": ENGINE.name}
 
 
 @app.get("/api/voices")
 def voices():
     if ENGINE is None:
-        raise HTTPException(503, "Model đang tải, chưa có danh sách giọng — kiểm tra GET /api/health")
-    return {"voices": [{"id": v["name"], "label": v["label"]} for v in ENGINE.list_voices()]}
+        detail = ENGINE_ERROR or (
+            "Model đang tải, chưa có danh sách giọng — kiểm tra GET /api/health"
+        )
+        raise HTTPException(503, detail)
+    return {
+        "voices": [
+            {"id": voice["name"], "label": voice["label"]}
+            for voice in ENGINE.list_voices()
+        ]
+    }
 
 
 @app.post("/api/preview")
 def preview(req: PreviewRequest):
-    from fastapi.responses import FileResponse
-
     if ENGINE is None:
-        raise HTTPException(503, "Model đang tải, chưa nghe thử được — kiểm tra GET /api/health")
+        detail = ENGINE_ERROR or (
+            "Model đang tải, chưa nghe thử được — kiểm tra GET /api/health"
+        )
+        raise HTTPException(503, detail)
     text = req.text.strip() or "Xin chào, đây là giọng đọc thử."
     preview_dir = WORK_DIR / "_preview"
     preview_dir.mkdir(exist_ok=True)
@@ -145,22 +208,56 @@ def preview(req: PreviewRequest):
         logger.exception("Nghe thử lỗi")
         raise HTTPException(500, f"Tổng hợp giọng lỗi: {e}")
     logger.info("Nghe thử xong sau %.2fs — %d ký tự", time.time() - t0, len(text))
-    return FileResponse(out_path, media_type="audio/wav")
+    return FileResponse(
+        out_path,
+        media_type="audio/wav",
+        background=BackgroundTask(out_path.unlink, missing_ok=True),
+    )
+
+
+@app.post("/api/debug/transcript")
+def save_debug_transcript(req: DebugTranscriptRequest):
+    path = _write_debug_transcript(req.model_dump())
+    logger.info("Đã lưu transcript debug: %s", path)
+    return {"ok": True, "path": str(path), "retentionDays": DEBUG_RETENTION_DAYS}
 
 
 @app.post("/api/synthesize")
 def synthesize(req: SynthesizeRequest):
     if ENGINE is None:
-        raise HTTPException(503, "Model đang tải, chưa sẵn sàng tổng hợp giọng — kiểm tra GET /api/health")
+        detail = ENGINE_ERROR or (
+            "Model đang tải, chưa sẵn sàng tổng hợp giọng — kiểm tra GET /api/health"
+        )
+        raise HTTPException(503, detail)
+    if any(not segment.vi.strip() for segment in req.segments):
+        raise HTTPException(422, "Mọi segment phải có bản dịch tiếng Việt")
+    if any(
+        segment.end <= segment.start or segment.end > req.durationSec
+        for segment in req.segments
+    ):
+        raise HTTPException(422, "Timestamp segment không hợp lệ hoặc vượt thời lượng video")
+    ids = [segment.id for segment in req.segments]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(422, "ID segment bị trùng")
     job_id = uuid.uuid4().hex[:16]
     job_dir = WORK_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Nhận job %s — %d câu, video %.1fs", job_id, len(req.segments), req.durationSec)
+    logger.info(
+        "Nhận job %s — %d câu, video %.1fs",
+        job_id,
+        len(req.segments),
+        req.durationSec,
+    )
 
     with JOBS_LOCK:
-        JOBS[job_id] = {"status": "running", "progress": 0.0, "audioUrl": None, "error": None}
+        JOBS[job_id] = {
+            "status": "queued",
+            "progress": 0.0,
+            "audioUrl": None,
+            "error": None,
+        }
 
-    threading.Thread(target=_run_job, args=(job_id, job_dir, req), daemon=True).start()
+    JOB_EXECUTOR.submit(_run_job, job_id, job_dir, req)
     return {"jobId": job_id}
 
 
@@ -175,8 +272,6 @@ def job_status(job_id: str):
 
 @app.get("/audio/{job_id}.{ext}")
 def get_audio(job_id: str, ext: str):
-    from fastapi.responses import FileResponse
-
     path = WORK_DIR / job_id / f"final.{ext}"
     if not path.exists():
         raise HTTPException(404, "Chưa có file audio (job chưa xong hoặc job_id sai)")
@@ -192,7 +287,14 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
     tag = f"[job {job_id}]"
     t_job = time.time()
     total = len(req.segments)
-    logger.info("%s BẮT ĐẦU — %d câu | video %.1fs | engine=%s", tag, total, req.durationSec, ENGINE.name)
+    logger.info(
+        "%s BẮT ĐẦU — %d câu | video %.1fs | engine=%s",
+        tag,
+        total,
+        req.durationSec,
+        ENGINE.name,
+    )
+    set_progress(0.0, status="running")
 
     try:
         segment_wavs = []
@@ -201,7 +303,7 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         for i, seg in enumerate(req.segments):
             raw_wav = job_dir / f"{seg.id:04d}_raw.wav"
             fit_wav = job_dir / f"{seg.id:04d}_fit.wav"
-            text = seg.vi.strip() or "Ừ"  # gTTS ném lỗi cho văn bản chỉ có dấu câu
+            text = seg.vi.strip()
             syllables = tts_engine.count_vi_syllables(text)
 
             t0 = time.time()
@@ -209,7 +311,13 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             t_synth = time.time() - t0
             t_synth_total += t_synth
 
-            info = audio_pipeline.stretch_to_fit(raw_wav, fit_wav, result.duration_sec, max(0.05, seg.end - seg.start))
+            info = audio_pipeline.stretch_to_fit(
+                raw_wav,
+                fit_wav,
+                result.duration_sec,
+                max(0.05, seg.end - seg.start),
+            )
+            raw_wav.unlink(missing_ok=True)
             info.update(id=seg.id, syllables=syllables)
             meta.append(info)
             segment_wavs.append(({"start": seg.start, "end": seg.end}, fit_wav))
@@ -235,6 +343,10 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         rates = [m["syllables"] / m["naturalSec"] for m in meta if m["naturalSec"] > 0]
         measured_rate = round(statistics.median(rates), 3) if rates else None
         overflow = [m["id"] for m in meta if m["overflowTruncated"]]
+
+        master_wav.unlink(missing_ok=True)
+        for _, wav_path in segment_wavs:
+            wav_path.unlink(missing_ok=True)
 
         with JOBS_LOCK:
             JOBS[job_id].update(
@@ -269,27 +381,21 @@ def load_engine_background() -> None:
         ENGINE_ERROR = str(e)
 
 
-def detect_public_ip() -> str | None:
-    """Gọi thử 1 dịch vụ echo-IP công khai, timeout ngắn, im lặng bỏ qua nếu
-    lỗi (VPS chặn outbound, hoặc máy local không cần) — chỉ là gợi ý hiển
-    thị, không bắt buộc để chạy."""
-    try:
-        import requests
-
-        r = requests.get("https://api.ipify.org", timeout=2)
-        ip = r.text.strip()
-        return ip if r.status_code == 200 and ip else None
-    except Exception:
-        return None
-
-
 def print_server_info(host: str, port: int) -> None:
-    logger.info("Môi trường: %s/%s | Python %s", platform.system().lower(), platform.machine(), platform.python_version())
-    logger.info("Swagger UI: http://127.0.0.1:%d/docs — bấm Authorize, dán X-API-Key để thử.", port)
+    logger.info(
+        "Môi trường: %s/%s | Python %s",
+        platform.system().lower(),
+        platform.machine(),
+        platform.python_version(),
+    )
+    logger.info(
+        "Swagger UI: http://127.0.0.1:%d/docs — bấm Authorize để thử.", port
+    )
     if host in ("0.0.0.0", "::"):
-        ip = detect_public_ip()
-        if ip:
-            logger.info("Đang bind ra ngoài — phát hiện IP công khai: %s (nên đặt HTTPS qua reverse proxy, xem deploy/README.md)", ip)
+        logger.warning(
+            "Server đang bind ra ngoài; hãy đặt HTTPS qua reverse proxy, "
+            "xem deploy/README.md"
+        )
 
 
 def main() -> None:
@@ -298,7 +404,12 @@ def main() -> None:
     ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     args = ap.parse_args()
 
-    logger.info("Đang mở HTTP trên %s:%d — nạp engine chạy song song trong nền, theo dõi qua GET /api/health...", args.host, args.port)
+    logger.info(
+        "Đang mở HTTP trên %s:%d — nạp engine trong nền, "
+        "theo dõi qua GET /api/health...",
+        args.host,
+        args.port,
+    )
     threading.Thread(target=load_engine_background, daemon=True).start()
     print_server_info(args.host, args.port)
 
