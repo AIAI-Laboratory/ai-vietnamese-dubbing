@@ -26,6 +26,8 @@ import json
 import logging
 import os
 import platform
+import re
+import shutil
 import statistics
 import sys
 import tempfile
@@ -60,7 +62,7 @@ load_dotenv(SERVER_DIR / ".env")
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -73,6 +75,21 @@ WORK_DIR.mkdir(exist_ok=True)
 LOG_PATH = WORK_DIR / "server.log"
 DEBUG_DIR = SERVER_DIR / "debug_transcripts"
 DEBUG_RETENTION_DAYS = max(1, int(os.environ.get("DEBUG_RETENTION_DAYS", "7")))
+
+# Job xong vẫn giữ audio trong RAM/đĩa để client tải về; sau ngần này phút thì
+# dọn — nếu không, mỗi bài giảng để lại một thư mục temp và một entry JOBS
+# sống tới khi tắt server.
+JOB_RETENTION_MIN = max(5, int(os.environ.get("JOB_RETENTION_MIN", "60")))
+# Chỉ một worker chạy job, nên hàng đợi dài chỉ làm client chờ vô ích.
+MAX_PENDING_JOBS = max(1, int(os.environ.get("MAX_PENDING_JOBS", "4")))
+# Transcript debug của bài dài cỡ vài MB; chặn body lớn hơn để không ai đẩy
+# được file khổng lồ vào đĩa qua endpoint này.
+MAX_BODY_BYTES = max(1, int(os.environ.get("MAX_BODY_MB", "16"))) * 1024 * 1024
+
+# job_id do server sinh bằng uuid4().hex[:16] — chốt đúng dạng đó trước khi
+# ghép vào đường dẫn file.
+JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+AUDIO_EXTS = {"opus", "mp3"}
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -106,6 +123,44 @@ ENGINE_ERROR: str | None = None
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kokoro-job")
+
+
+@app.middleware("http")
+async def limit_body_size(request, call_next):
+    """Từ chối sớm theo Content-Length, trước khi đọc body vào RAM."""
+
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
+        return JSONResponse(
+            {"detail": f"Body vượt {MAX_BODY_BYTES // (1024 * 1024)} MB"},
+            status_code=413,
+        )
+    return await call_next(request)
+
+
+def _evict_old_jobs() -> None:
+    """Xoá job quá hạn khỏi JOBS và xoá thư mục audio tương ứng."""
+
+    cutoff = time.time() - JOB_RETENTION_MIN * 60
+    with JOBS_LOCK:
+        expired = [
+            job_id
+            for job_id, job in JOBS.items()
+            if job.get("status") in ("done", "error")
+            and job.get("finishedAt", 0) < cutoff
+        ]
+        for job_id in expired:
+            JOBS.pop(job_id, None)
+    for job_id in expired:
+        shutil.rmtree(WORK_DIR / job_id, ignore_errors=True)
+    if expired:
+        logger.info("Đã dọn %d job quá hạn (> %d phút)", len(expired), JOB_RETENTION_MIN)
+
+
+def _validated_job_id(job_id: str) -> str:
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(404, "job_id không hợp lệ")
+    return job_id
 
 
 class Segment(BaseModel):
@@ -239,6 +294,12 @@ def synthesize(req: SynthesizeRequest):
     ids = [segment.id for segment in req.segments]
     if len(ids) != len(set(ids)):
         raise HTTPException(422, "ID segment bị trùng")
+    _evict_old_jobs()
+    with JOBS_LOCK:
+        pending = sum(1 for job in JOBS.values() if job["status"] in ("queued", "running"))
+    if pending >= MAX_PENDING_JOBS:
+        raise HTTPException(429, f"Đang có {pending} job chờ — thử lại sau")
+
     job_id = uuid.uuid4().hex[:16]
     job_dir = WORK_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -255,6 +316,7 @@ def synthesize(req: SynthesizeRequest):
             "progress": 0.0,
             "audioUrl": None,
             "error": None,
+            "finishedAt": 0.0,
         }
 
     JOB_EXECUTOR.submit(_run_job, job_id, job_dir, req)
@@ -264,7 +326,7 @@ def synthesize(req: SynthesizeRequest):
 @app.get("/api/job/{job_id}")
 def job_status(job_id: str):
     with JOBS_LOCK:
-        job = JOBS.get(job_id)
+        job = JOBS.get(_validated_job_id(job_id))
     if not job:
         raise HTTPException(404, "Không tìm thấy job")
     return job
@@ -272,10 +334,12 @@ def job_status(job_id: str):
 
 @app.get("/audio/{job_id}.{ext}")
 def get_audio(job_id: str, ext: str):
-    path = WORK_DIR / job_id / f"final.{ext}"
+    if ext not in AUDIO_EXTS:
+        raise HTTPException(404, "Định dạng audio không hợp lệ")
+    path = WORK_DIR / _validated_job_id(job_id) / f"final.{ext}"
     if not path.exists():
         raise HTTPException(404, "Chưa có file audio (job chưa xong hoặc job_id sai)")
-    media_type = "audio/opus" if ext == "opus" else "audio/mpeg" if ext == "mp3" else "application/octet-stream"
+    media_type = "audio/opus" if ext == "opus" else "audio/mpeg"
     return FileResponse(path, media_type=media_type)
 
 
@@ -352,6 +416,7 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             JOBS[job_id].update(
                 status="done", progress=1.0, audioUrl=f"/audio/{job_id}.{ext}",
                 measuredSyllablesPerSec=measured_rate, overflowSegmentIds=overflow, segments=meta,
+                finishedAt=time.time(),
             )
         audio_sec = sum(m["finalSec"] for m in meta)
         elapsed = time.time() - t_job
@@ -361,7 +426,7 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
     except Exception as e:
         logger.exception("%s LỖI sau %s", tag, _fmt_dur(time.time() - t_job))
         with JOBS_LOCK:
-            JOBS[job_id].update(status="error", error=str(e))
+            JOBS[job_id].update(status="error", error=str(e), finishedAt=time.time())
 
 
 # ---------------------------------------------------------------------------
