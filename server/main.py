@@ -8,7 +8,7 @@ gắn kèm.
   GET  /api/voices              -> {"voices":[{"id","label"}]} (503 nếu đang loading)
   POST /api/preview             body {text,voice} -> file WAV
   POST /api/synthesize          body {voice,durationSec,segments:[{id,start,end,vi}]} -> {"jobId"}
-  GET  /api/job/{jobId}         -> {"status","progress","audioUrl","measuredSyllablesPerSec","segments","error",...}
+  GET  /api/job/{jobId}         -> {"status","progress","audioUrl","measuredSyllablesPerSec","segments","duckEnvelope","error",...}
   GET  /audio/{jobId}.{ext}     -> file audio
 
 TOÀN BỘ route trên khoá bằng header X-API-Key (xem auth.py) — BẮT BUỘC,
@@ -411,6 +411,7 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         master_wav = job_dir / "master.wav"
         t0 = time.time()
         audio_pipeline.assemble_timeline(segment_wavs, req.durationSec, master_wav)
+        duck = audio_pipeline.duck_envelope(master_wav)
         logger.info("%s ghép %d câu vào timeline %.1fs — xong sau %.2fs", tag, total, req.durationSec, time.time() - t0)
         set_progress(0.85)
 
@@ -432,7 +433,7 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             JOBS[job_id].update(
                 status="done", progress=1.0, audioUrl=f"/audio/{job_id}.{ext}",
                 measuredSyllablesPerSec=measured_rate, overflowSegmentIds=overflow, segments=meta,
-                finishedAt=time.time(),
+                duckEnvelope=duck, finishedAt=time.time(),
             )
         audio_sec = sum(m["finalSec"] for m in meta)
         elapsed = time.time() - t_job

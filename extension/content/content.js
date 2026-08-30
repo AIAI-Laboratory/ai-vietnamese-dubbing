@@ -37,6 +37,9 @@
     subtitleOffsetX: 0,
     subtitleOffsetY: 0,
     dubVolume: 1.0,
+    // Hệ số nhân lên đường bao ducking do server tính: 1.0 = giữ nhạc nền
+    // và tiếng động của video ở mức server đề xuất, 0 = mute hẳn như bản cũ.
+    bedVolume: 1.0,
     serverUrl: "http://127.0.0.1:18765",
     serverApiKey: "",
     voice: "",
@@ -67,6 +70,11 @@
   let mode = "dubbed"; // dubbed | original
   let settings = { ...DEFAULT_SETTINGS };
   let voicesCache = null;
+  // Đường bao ducking của bản lồng tiếng đang phát (uint8, mỗi mẫu là âm
+  // lượng track gốc tại mốc index/duckFps giây). Xem audio_pipeline.duck_envelope.
+  let duckEnv = null;
+  let duckFps = 0;
+  let duckTimer = null;
   const previewAudioCache = new Map(); // voice -> {base64, mime} — nghe lại không tổng hợp lại
 
   // Adapter của trang đang mở; null nghĩa là extension không chạy ở đây.
@@ -124,6 +132,7 @@
       clearInterval(syncTimer);
       syncTimer = null;
     }
+    stopDucking();
     if (audioEl) {
       audioEl.pause();
       audioEl.remove();
@@ -529,6 +538,7 @@
   }
 
   function applyResult(record) {
+    loadDuckEnvelope(record);
     currentPlan = record.plan || null;
     currentTranslated = record.translated || null;
     currentSubtitles = record.subtitles;
@@ -563,6 +573,61 @@
     injectControls();
     startSync();
     setMode("dubbed");
+  }
+
+  // -------------------------------------------------------------------------
+  // Ducking: hạ âm lượng video gốc theo đường bao thay vì mute hẳn, nên nhạc
+  // nền và tiếng động vẫn nghe được dưới giọng thuyết minh. Chỉ đổi độ lợi
+  // qua video.volume — KHÔNG dùng Web Audio createMediaElementSource, node đó
+  // chiếm quyền định tuyến audio của player và tắt tiếng hẳn nếu media bị
+  // tainted CORS.
+  // -------------------------------------------------------------------------
+
+  function loadDuckEnvelope(record) {
+    duckEnv = null;
+    duckFps = 0;
+    const env = record && record.duckEnvelope;
+    if (!env || !env.data || !env.fps) return; // bản cũ trong cache không có
+    try {
+      const binary = atob(env.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      duckEnv = bytes;
+      duckFps = env.fps;
+    } catch (e) {
+      console.warn("[LDUB] đường bao ducking hỏng, quay lại mute video gốc:", e);
+    }
+  }
+
+  function bedGainAt(seconds) {
+    if (!duckEnv || !duckFps) return 0;
+    const i = Math.min(duckEnv.length - 1, Math.max(0, Math.round(seconds * duckFps)));
+    return duckEnv[i] / 255;
+  }
+
+  function applyBedVolume() {
+    if (!video || mode === "original") return;
+    const bed = (settings.bedVolume ?? 1) * bedGainAt(video.currentTime);
+    try {
+      video.muted = bed <= 0.001;
+      video.volume = Math.min(1, Math.max(0, bed));
+    } catch (e) {
+      /* video có thể vừa bị gỡ khỏi DOM */
+    }
+  }
+
+  function startDucking() {
+    stopDucking();
+    if (!duckEnv) return;
+    // 50 ms một bước: bước độ lợi đủ nhỏ để không nghe ra tiếng rít khi đổi.
+    duckTimer = setInterval(applyBedVolume, 50);
+  }
+
+  function stopDucking() {
+    if (duckTimer) {
+      clearInterval(duckTimer);
+      duckTimer = null;
+    }
   }
 
   function base64ToBlob(base64, mime) {
@@ -850,16 +915,24 @@
     updateSubtitle();
   }
 
-  // Chỉ 2 chế độ: Gốc (mute audio thuyết minh, mở lại âm video) hoặc
-  // Thuyết minh (mute video, phát audio thuyết minh) — không còn chế độ
-  // "Cả hai" (phát cùng lúc, dễ nghe rối hai giọng chồng nhau).
+  // Hai chế độ: Gốc (mute thuyết minh, trả âm video về nguyên) hoặc Thuyết
+  // minh. Ở chế độ Thuyết minh, video gốc được hạ theo đường bao ducking để
+  // giữ nhạc nền; không có đường bao (bản cũ trong cache, hoặc người dùng đặt
+  // bedVolume = 0) thì mute hẳn như trước.
   function applyVolumeForMode() {
     if (mode === "original") {
-      video.muted = false;
+      stopDucking();
+      resetVideoVolume();
       audioEl.volume = 0;
+      return;
+    }
+    audioEl.volume = settings.dubVolume ?? 1;
+    if (duckEnv && (settings.bedVolume ?? 1) > 0) {
+      applyBedVolume();
+      startDucking();
     } else {
+      stopDucking();
       video.muted = true;
-      audioEl.volume = settings.dubVolume ?? 1;
     }
   }
 

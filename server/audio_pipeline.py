@@ -21,6 +21,8 @@ Cần ffmpeg trong PATH.
 
 from __future__ import annotations
 
+import base64
+import math
 import subprocess
 import wave
 from pathlib import Path
@@ -30,6 +32,61 @@ SAMPLE_RATE = 24000
 # Khoảng thở chừa lại trước câu kế khi mượn khoảng lặng — hết sạch thì hai
 # câu dính liền nhau, nghe hụt hơi.
 BORROW_GAP_SEC = 0.08
+
+# --- Đường bao ducking cho track gốc của video --------------------------------
+# Trình duyệt hạ âm lượng video gốc theo đường cong này thay vì mute hẳn, nên
+# nhạc nền và tiếng động vẫn còn. Tính từ chính track thuyết minh đã dựng
+# xong: chỉ đổi độ lợi, không đụng vào phổ tín hiệu, nên không sinh nhiễu.
+DUCK_FPS = 20  # 50 ms mỗi mẫu — đủ mịn, 40 phút video chỉ tốn 48 KB
+# Mức nền khi đang đọc và khi im lặng, theo thực hành voice-over phát thanh
+# (-15 dB và -6 dB). volume của HTML5 là biên độ tuyến tính: 10^(dB/20).
+DUCK_SPEAKING = 0.18
+DUCK_SILENT = 0.50
+# Ngưỡng coi là "đang có tiếng đọc" (RMS trên toàn thang, ~-34 dBFS).
+DUCK_SPEECH_RMS = 0.02
+# Xuống nhanh để không đè lên đầu câu, lên chậm để nền dâng êm.
+DUCK_ATTACK_SEC = 0.08
+DUCK_RELEASE_SEC = 0.40
+
+
+def _one_pole(tau_sec: float, fps: int) -> float:
+    return math.exp(-1.0 / max(1e-6, tau_sec * fps))
+
+
+def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict:
+    """Độ lợi cho track gốc theo thời gian, lấy từ track thuyết minh.
+
+    Trả về {"fps", "data"} với data là chuỗi base64 của mảng uint8, mỗi byte
+    là âm lượng track gốc (0-255 tương ứng 0.0-1.0) tại mốc index/fps giây.
+    """
+
+    import numpy as np
+
+    with wave.open(str(wav_path), "rb") as f:
+        sample_rate = f.getframerate()
+        pcm = f.readframes(f.getnframes())
+
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    hop = max(1, sample_rate // fps)
+    frames = len(samples) // hop
+    if frames == 0:
+        return {"fps": fps, "data": ""}
+
+    block = samples[: frames * hop].reshape(frames, hop)
+    rms = np.sqrt(np.mean(np.square(block), axis=1))
+    targets = np.where(rms > DUCK_SPEECH_RMS, DUCK_SPEAKING, DUCK_SILENT)
+
+    attack = _one_pole(DUCK_ATTACK_SEC, fps)
+    release = _one_pole(DUCK_RELEASE_SEC, fps)
+    gains = np.empty(frames, dtype=np.float32)
+    gain = float(DUCK_SILENT)
+    for i, target in enumerate(targets):
+        coef = attack if target < gain else release
+        gain = float(target) + (gain - float(target)) * coef
+        gains[i] = gain
+
+    quantized = np.clip(np.rint(gains * 255), 0, 255).astype(np.uint8)
+    return {"fps": fps, "data": base64.b64encode(quantized.tobytes()).decode("ascii")}
 
 
 def available_slots(segments: list[dict], duration_sec: float) -> dict[int, float]:

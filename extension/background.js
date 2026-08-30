@@ -760,6 +760,7 @@ async function runJob(msg, port) {
     plan, terminology, translated, verify, subtitles,
     audioBase64: base64, audioMime: mime,
     measuredSyllablesPerSec: done.measuredSyllablesPerSec || null,
+    duckEnvelope: done.duckEnvelope || null,
   });
   await calibrateRate(settings, done.measuredSyllablesPerSec);
   log(`job xong toàn bộ sau ${((Date.now() - tJob) / 1000).toFixed(1)}s`);
@@ -799,7 +800,10 @@ async function runResynth(msg, port) {
     post(port, 'PROGRESS', { stage: 'synthesize', pct: 10 + Math.round(p * 85), note: synthesizeNote(data) });
   });
   const { base64, mime } = await fetchAudioAsBase64(done.audioUrl, settings.serverUrl, settings.serverApiKey);
-  post(port, 'DONE', { plan: msg.plan, translated: msg.translated, subtitles, audioBase64: base64, audioMime: mime });
+  post(port, 'DONE', {
+    plan: msg.plan, translated: msg.translated, subtitles,
+    audioBase64: base64, audioMime: mime, duckEnvelope: done.duckEnvelope || null,
+  });
 }
 
 chrome.runtime.onConnect.addListener((port) => {

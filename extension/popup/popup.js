@@ -11,6 +11,7 @@
 
 const DEFAULTS = {
   dubVolume: 1.0,
+  bedVolume: 1.0,
   subtitlesOn: false,
   subtitlesEnOn: true,
   subtitlePosition: 'bottom',
@@ -52,6 +53,9 @@ async function loadControls() {
   $('dubVolume').value = s.dubVolume;
   $('dubVolumeVal').textContent = (+s.dubVolume).toFixed(2);
   fillSlider($('dubVolume'));
+  $('bedVolume').value = s.bedVolume;
+  $('bedVolumeVal').textContent = (+s.bedVolume).toFixed(2);
+  fillSlider($('bedVolume'));
 
   $('subtitlesOn').checked = s.subtitlesOn === true;
   $('subtitlesEnOn').checked = s.subtitlesEnOn !== false;
@@ -62,6 +66,12 @@ async function loadControls() {
 
 // Âm lượng: lưu ngay khi kéo (input), không đợi thả chuột — cùng lúc cập
 // nhật số hiển thị + thanh trượt tô màu.
+$('bedVolume').addEventListener('input', (e) => {
+  $('bedVolumeVal').textContent = (+e.target.value).toFixed(2);
+  fillSlider(e.target);
+  saveFields({ bedVolume: +e.target.value });
+});
+
 $('dubVolume').addEventListener('input', (e) => {
   $('dubVolumeVal').textContent = (+e.target.value).toFixed(2);
   fillSlider(e.target);
