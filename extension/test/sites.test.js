@@ -51,3 +51,51 @@ test('mỗi adapter khai báo đủ interface content script dùng', () => {
     assert.ok(Array.isArray(site.dockSelectors));
   }
 });
+
+test('mốc thời gian của bảng transcript', () => {
+  const sites = loadAt('https://www.youtube.com/watch?v=x');
+  assert.strictEqual(sites.parseClockTime('0:05'), 5);
+  assert.strictEqual(sites.parseClockTime('1:02'), 62);
+  assert.strictEqual(sites.parseClockTime('1:02:03'), 3723);
+  assert.strictEqual(sites.parseClockTime(' 12:34 '), 754);
+  for (const bad of ['', 'abc', '5', '1:2:3:4', 'a:b']) {
+    assert.strictEqual(sites.parseClockTime(bad), null, `phải loại: "${bad}"`);
+  }
+});
+
+test('dòng transcript thành cue liên tục, dòng cuối kéo tới hết video', () => {
+  const sites = loadAt('https://www.youtube.com/watch?v=x');
+  const cues = sites.segmentsToCues(
+    [
+      { time: '0:10', text: 'second line' },
+      { time: '0:00', text: 'first line' }, // sai thứ tự -> phải tự sắp xếp
+      { time: 'xx', text: 'rác' },
+      { time: '0:20', text: '   ' }, // rỗng -> bỏ
+    ],
+    45,
+  );
+  // JSON hoá trước khi so: object sinh trong vm có prototype của realm khác,
+  // deepStrictEqual sẽ báo lệch dù nội dung y hệt.
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(cues)),
+    [
+      { start: 0, end: 10, text: 'first line' },
+      { start: 10, end: 45, text: 'second line' },
+    ],
+  );
+});
+
+test('dòng cuối vẫn có độ dài dương khi thiếu thời lượng video', () => {
+  const sites = loadAt('https://www.youtube.com/watch?v=x');
+  const [cue] = sites.segmentsToCues([{ time: '1:00', text: 'chỉ một dòng' }], undefined);
+  assert.ok(cue.end > cue.start, `end (${cue.end}) phải lớn hơn start (${cue.start})`);
+});
+
+test('nhận ra bảng transcript đang ở tiếng Việt', () => {
+  const sites = loadAt('https://www.youtube.com/watch?v=x');
+  const english = [{ text: 'hello there' }, { text: 'how are you' }, { text: 'fine thanks' }];
+  const vietnamese = [{ text: 'xin chào các bạn' }, { text: 'hôm nay chúng ta học' }, { text: 'ok' }];
+  assert.strictEqual(sites.looksVietnamese(english), false);
+  assert.strictEqual(sites.looksVietnamese(vietnamese), true);
+  assert.strictEqual(sites.looksVietnamese([]), false);
+});

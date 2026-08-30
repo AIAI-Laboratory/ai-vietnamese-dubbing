@@ -15,8 +15,8 @@ provider. Video and audio never leave your machine.
 ## How it works
 
 ```
-English captions (Coursera <track>, YouTube timedtext)
-        |  fetched by the site adapter in extension/lib/sites.js
+English captions (Coursera <track>, YouTube transcript panel)
+        |  read by the site adapter in extension/lib/sites.js
         v
 Group captions into sentences, budget syllables per sentence
         |
@@ -83,8 +83,16 @@ and click **Load voices**.
 
 ### 4. Use it
 
-Open a Coursera lecture or a YouTube video that has English captions, turn
-captions (CC) on, and click the mic button next to the video controls.
+Open a Coursera lecture or a YouTube video that has English captions and
+click the mic button next to the video controls. On Coursera, turn captions
+(CC) on first. On YouTube the extension opens the transcript panel itself;
+if that panel is showing a language other than English, switch it and click
+again.
+
+YouTube captions are read from the transcript panel rather than downloaded:
+since 2025 the timedtext endpoint requires a runtime-signed PoToken and
+answers every unsigned request with an empty 200, so downloading them is no
+longer possible from an extension.
 
 Support for another site is one adapter in `extension/lib/sites.js` plus a
 matching entry in `extension/manifest.json`.

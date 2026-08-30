@@ -496,7 +496,8 @@
       if (!cues || !cues.length) {
         setPanel(
           0,
-          "Không tìm thấy phụ đề tiếng Anh cho bài này. Hãy bật CC trên player rồi thử lại.",
+          (site && site.noCuesHint)
+            || "Không tìm thấy phụ đề tiếng Anh cho bài này. Hãy bật CC trên player rồi thử lại.",
           true,
         );
         currentState = "error";
