@@ -1,6 +1,6 @@
 /**
  * Popup icon extension — nơi chỉnh nhanh mọi thứ TRỪ API dịch/giọng đọc
- * (hai cái đó nằm ở trang Cài đặt, xem options/options.js). Đổi ở đây áp
+ * (Gemini API key và giọng đọc nằm ở trang Cài đặt, xem options/options.js). Đổi ở đây áp
  * dụng ngay cho lần mở/tải lại tab Coursera kế tiếp — content script chỉ
  * đọc settings lúc trang tải, không có kênh đẩy live vào tab đang mở.
  *
@@ -28,7 +28,7 @@ async function getSettings() {
 }
 
 /** Đọc bản hiện có, ghi đè đúng field trong `patch`, lưu lại nguyên object —
- * giữ API key/model/giọng của options.js an toàn. */
+ * giữ Gemini API key/giọng của options.js an toàn. */
 async function saveFields(patch) {
   const stored = await chrome.storage.local.get('settings');
   const settings = { ...(stored.settings || {}), ...patch };
@@ -119,8 +119,7 @@ async function main() {
   const s = stored.settings || {};
 
   const missing = [];
-  if (!s.apiKey) missing.push('API key');
-  if (!s.model) missing.push('model dịch');
+  if (!s.geminiApiKey) missing.push('Gemini API key');
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const onCoursera = tab && /^https:\/\/www\.coursera\.org\/learn\//.test(tab.url || '');
@@ -145,7 +144,7 @@ async function main() {
   if (!server.ok) { text = 'TTS server: chưa kết nối được — xem server/README.md'; ok = false; }
   else if (d.status === 'loading') { text = 'TTS server: đang tải model, chờ chút...'; ok = false; }
   else if (d.status === 'error') { text = 'TTS server: lỗi nạp model — ' + (d.error || '?'); ok = false; }
-  else { text = 'TTS server: sẵn sàng' + (d.mock ? ' (chế độ mock)' : ''); ok = true; }
+  else { text = 'TTS server: sẵn sàng'; ok = true; }
   serverEl.className = 'status ' + (ok ? 'ok' : 'err');
   serverEl.textContent = text;
   statusEl.after(serverEl);

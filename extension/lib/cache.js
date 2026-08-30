@@ -28,9 +28,15 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     });
   }
 
-  /** Khoá cache: đổi bất kỳ phần nào (giọng, model dịch, glossary) đều tạo bản ghi mới. */
-  function makeKey({ videoId, voice, planVersion }) {
-    return [videoId, voice || 'default', planVersion || 'v1'].join('::');
+  /** Khoá cache thay đổi theo toàn bộ cấu hình có thể làm audio khác đi. */
+  function makeKey({ videoId, voice, planVersion, translationModel, viSyllablesPerSec }) {
+    return JSON.stringify([
+      videoId,
+      voice || 'default',
+      planVersion || 'v1',
+      translationModel || '',
+      viSyllablesPerSec || 0,
+    ]);
   }
 
   async function get(keyParts) {

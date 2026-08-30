@@ -2,14 +2,14 @@
   "manifest_version": 3,
   "name": "Local AI Vietnamese Dubbing",
   "version": "0.1.0",
-  "description": "Thuyết minh tiếng Việt tự động cho video Coursera. Dịch qua LLM API (base URL tuỳ chọn), tổng hợp giọng nói qua server local trên máy bạn.",
+  "description": "Thuyết minh tiếng Việt tự động cho video Coursera. Dịch qua Gemini API chính thức, tổng hợp giọng nói qua server local trên máy bạn.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "https://www.coursera.org/*",
+    "https://generativelanguage.googleapis.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"
   },
