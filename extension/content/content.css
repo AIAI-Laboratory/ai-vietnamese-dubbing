@@ -167,9 +167,7 @@
   font-size: 12.5px;
   color: #d4d4d8;
 }
-/* Khối label-trên/control-dưới — dùng cho "Giọng đọc": tên giọng dài (vd
-   "Google (giọng máy, qua mạng — không chọn được nam/nữ)") không đủ chỗ
-   trên cùng một hàng với label như .ldub-row, cần cả bề ngang của panel. */
+/* Khối label-trên/control-dưới cho tên voice dài: cần cả bề ngang panel. */
 .ldub-block { margin-bottom: 10px; }
 .ldub-row:last-child, .ldub-block:last-child { margin-bottom: 0; }
 .ldub-block-label { font-size: 12.5px; color: #d4d4d8; margin-bottom: 7px; }
@@ -206,9 +204,7 @@
   padding: 5px 8px;
   font-size: 12px;
   font-family: inherit;
-  /* Chiếm hết bề ngang còn lại (panel 270px, đã trừ nút nghe thử) thay vì
-     bó cứng 130px — tên giọng dài (gTTS: "Google (giọng máy, qua mạng —
-     không chọn được nam/nữ)") trước đây bị cắt cụt giữa chừng. */
+  /* Chiếm hết bề ngang còn lại sau khi trừ nút nghe thử. */
   flex: 1;
   min-width: 0;
   overflow: hidden;

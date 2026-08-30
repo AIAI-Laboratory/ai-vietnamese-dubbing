@@ -1,13 +1,12 @@
 /**
- * Timeline planner — gộp cue phụ đề thành câu, gắn timestamp tuyệt đối và
- * tính hạn mức âm tiết cho mỗi câu.
+ * Timeline planner — gộp cue phụ đề thành câu, gắn timestamp tuyệt đối,
+ * tính hạn mức âm tiết và tạo prompt dịch học thuật theo chuyên ngành.
  *
  * Hai điểm đáng lưu ý:
  *  - viSyllablesPerSec truyền vào theo tham số (đọc từ settings, người dùng
  *    hiệu chỉnh sau khi benchmark TTS) thay vì hằng số cố định.
- *  - Prompt yêu cầu trả JSON dạng OBJECT {"segments":[...]}  thay vì mảng
- *    trần, vì một số gateway OpenAI-compatible chỉ đảm bảo hợp lệ khi bật
- *    response_format json_object — object dễ tương thích hơn mảng.
+ *  - Prompt trả JSON dạng object {"segments":[...]} để Gemini structured
+ *    output luôn có schema nhất quán giữa các bước dịch/review.
  *
  * File này chạy được ở cả hai môi trường: content script (world DOM) và
  * service worker (nạp bằng importScripts trong background.js) — nên không
@@ -19,8 +18,8 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const STRETCH_MIN = 0.90;
   const STRETCH_MAX = 1.10;
   const ROOMY_RATIO = 0.75;
-  // gTTS đo được 3.0-3.036 âm tiết/giây (đo trên 2 job thật, xem server/README.md).
-  const DEFAULT_RATE = 3.0;
+  // Baseline an toàn; tốc độ thực tế phụ thuộc voice Kokoro và CPU.
+  const DEFAULT_RATE = 2.6;
 
   const VI_MARKS = /[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i;
 
@@ -127,7 +126,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
         stretchMin: STRETCH_MIN,
         stretchMax,
         note: rate === DEFAULT_RATE
-          ? 'mặc định đo từ gTTS — đổi engine thì hiệu chỉnh lại trong Cài đặt'
+          ? 'baseline Kokoro — hiệu chỉnh lại trong Cài đặt sau khi chạy thử'
           : 'đã hiệu chỉnh theo Cài đặt',
       },
       stats: {
@@ -149,27 +148,109 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     return chunks;
   }
 
-  function buildTranslateSystemPrompt(rate) {
-    const glossaryLines = Object.keys(DUB.GLOSSARY)
-      .map((k) => '  ' + k + ' -> ' + DUB.GLOSSARY[k]).join('\n');
+  function buildTerminologySystemPrompt() {
     return [
-      'Bạn dịch phụ đề bài giảng lập trình từ tiếng Anh sang tiếng Việt để lồng tiếng cho video.',
+      'Bạn là biên tập viên thuật ngữ học thuật Anh-Việt cho bài giảng trực tuyến.',
+      'Đọc mẫu transcript, xác định đúng lĩnh vực và lập glossary dùng thống nhất khi lồng tiếng.',
       '',
-      'RÀNG BUỘC QUAN TRỌNG NHẤT — độ dài:',
+      'QUY TẮC:',
+      '- Chỉ lấy tối đa 8 thuật ngữ có rủi ro dịch sai cao nhất.',
+      '- Không liệt kê từ phổ thông, từ chỉ xuất hiện một lần mà nghĩa đã rõ, hoặc biến thể trùng nhau.',
+      '- Chỉ dịch sang tiếng Việt khi đó là cách gọi chuẩn, tự nhiên mà giới chuyên môn Việt Nam thực sự dùng.',
+      '- Giữ nguyên tên riêng, tên sản phẩm và thuật ngữ mà người Việt trong ngành thường dùng bằng tiếng Anh.',
+      '- Không dịch từng chữ nếu nghĩa chuyên ngành khác nghĩa thông thường.',
+      '- Chỉ đưa vào glossary khi đủ chắc chắn; nếu còn phụ thuộc ngữ cảnh từng câu thì bỏ qua.',
+      '- Không thêm diễn giải, định nghĩa hoặc kiến thức ngoài transcript.',
+      '',
+      'Mỗi mục có action="keep" khi phải giữ nguyên canonical English, hoặc action="translate" khi có thuật ngữ Việt tự nhiên.',
+      'Mặc định thận trọng: với nhãn kỹ thuật, tên pattern, tên category, idiom hoặc thuật ngữ ẩn dụ, giữ canonical English trừ khi chắc chắn có cách gọi Việt tự nhiên.',
+      'Không được dịch đen các nhãn kỹ thuật mang tính ẩn dụ, idiom, tên pattern hay tên khái niệm đã quen dùng bằng tiếng Anh.',
+      'Nếu không chắc giới chuyên môn Việt Nam dùng bản dịch nào, chọn action="keep".',
+      '',
+      'CHỈ trả JSON đúng dạng:',
+      '{"subject":"lĩnh vực cụ thể","terms":[{"source":"English term","target":"cách dùng thống nhất","action":"keep|translate"}]}',
+    ].join('\n');
+  }
+
+  function buildTerminologyUserPrompt(segments) {
+    const transcript = segments.map((segment) => segment.en).join(' ').slice(0, 10000);
+    return 'MẪU TRANSCRIPT BÀI GIẢNG:\n' + transcript;
+  }
+
+  function buildTerminologyRetryUserPrompt(segments) {
+    const transcript = segments.map((segment) => segment.en).join(' ').slice(0, 6000);
+    return [
+      'Chỉ chọn tối đa 5 thuật ngữ chuyên ngành dễ dịch sai từ transcript sau.',
+      'Với mỗi thuật ngữ, dùng action="keep" trừ khi chắc chắn có bản dịch Việt tự nhiên.',
+      'Trả JSON object ngắn, không giải thích.',
+      '',
+      transcript,
+    ].join('\n');
+  }
+
+  function parseTerminologyResponse(text) {
+    const data = extractJson(text);
+    const subject = data && typeof data.subject === 'string'
+      ? data.subject.trim().slice(0, 120)
+      : '';
+    const sourceTerms = data && Array.isArray(data.terms) ? data.terms : [];
+    const seen = new Set();
+    const terms = [];
+    for (const term of sourceTerms) {
+      if (!term || typeof term.source !== 'string' || typeof term.target !== 'string') continue;
+      const source = term.source.trim().slice(0, 120);
+      const rawTarget = term.target.trim().slice(0, 120);
+      const key = source.toLocaleLowerCase('en');
+      if (!source || !rawTarget || seen.has(key)) continue;
+      seen.add(key);
+      // Schema thiếu action không đủ căn cứ để tự dịch thuật ngữ chuyên ngành.
+      const action = term.action === 'translate' ? 'translate' : 'keep';
+      const target = action === 'keep' ? source : rawTarget;
+      terms.push({ source, target, action });
+      if (terms.length >= 8) break;
+    }
+    return { subject, terms };
+  }
+
+  function buildTranslateSystemPrompt(rate, terminology) {
+    terminology = terminology || {};
+    const courseTerms = Array.isArray(terminology.terms) ? terminology.terms : [];
+    const courseGlossaryLines = courseTerms.length
+      ? courseTerms.map((term) => '  ' + term.source + ' [' + term.action + '] -> ' + term.target).join('\n')
+      : '  (chưa có; tự suy luận thận trọng từ ngữ cảnh)';
+    const subject = terminology.subject || 'tự xác định từ nội dung';
+    return [
+      'Bạn là biên dịch viên học thuật Anh-Việt, chuyên dịch bài giảng và khoá học để lồng tiếng.',
+      'Lĩnh vực bài học: ' + subject + '.',
+      '',
+      'THỨ TỰ ƯU TIÊN:',
+      '1. Đúng nghĩa học thuật và đúng ngữ cảnh chuyên ngành.',
+      '2. Nhất quán thuật ngữ trong toàn bài.',
+      '3. Tự nhiên, rõ ràng khi giảng bằng tiếng Việt.',
+      '4. Vừa thời lượng lồng tiếng.',
+      '',
+      'ĐỘ CHÍNH XÁC HỌC THUẬT:',
+      '- Giữ nguyên phủ định, điều kiện, mức độ chắc chắn, quan hệ nguyên nhân-kết quả và phép so sánh.',
+      '- Câu định nghĩa phải giữ đúng đối tượng và thuộc tính; không đảo nghĩa, suy diễn hay thêm kiến thức.',
+      '- Giữ nguyên tên riêng, tổ chức, sản phẩm, công thức, biến, đơn vị và ký hiệu chuyên môn.',
+      '- Tuân thủ action trong glossary: keep nghĩa là giữ canonical English; translate nghĩa là dùng target.',
+      '- Khi cân nhắc một bản dịch, tự hỏi liệu người trong ngành có thực sự nói cụm Việt đó không. Nếu cụm nghe như hình ảnh đen, từ phổ thông ghép máy móc hoặc văn dịch, dùng canonical English.',
+      '- Không dịch đen nhãn kỹ thuật mang tính ẩn dụ, idiom, tên pattern hoặc tên khái niệm nếu ngành thường dùng canonical English.',
+      '- Dịch theo ý trọn vẹn của câu, không bám từng từ và không dùng văn phong máy dịch.',
+      '',
+      'GLOSSARY TỰ ĐỘNG CỦA BÀI:',
+      courseGlossaryLines,
+      '',
+      'GIỚI HẠN THỜI LƯỢNG:',
       'Mỗi câu có một hạn mức âm tiết. Bản dịch KHÔNG ĐƯỢC vượt hạn mức đó.',
+      'Tốc độ tham chiếu là ' + rate + ' âm tiết/giây.',
       'Âm tiết đếm theo tiếng cách nhau bằng khoảng trắng; thuật ngữ tiếng Anh giữ',
       'nguyên tính theo số âm tiết khi đọc lên (roughly ceil(độ_dài/3)).',
-      'Vượt hạn mức thì lồng tiếng lệch khỏi hình. Thà diễn đạt gọn hơn còn hơn vượt.',
+      'Rút gọn cách diễn đạt, nhưng KHÔNG được bỏ phủ định, điều kiện, số liệu hoặc ý chính để vừa hạn mức.',
       'Cắt cụm độn quen thuộc của dịch máy: "Đó là lý do tại sao" thành "Vì thế",',
       '"Điều này có nghĩa là" thành "Tức là"; bỏ "việc", "một cách", "sự" khi không cần.',
       '',
-      'GIỮ NGUYÊN TIẾNG ANH (không dịch, không phiên âm):',
-      DUB.KEEP_ENGLISH.join(', '),
-      '',
-      'DỊCH THỐNG NHẤT (dùng đúng một cách suốt cả bài, không đổi qua lại):',
-      glossaryLines,
-      '',
-      'VĂN PHONG: giọng giảng bài, trung tính, câu ngắn thuận tai khi đọc lên.',
+      'VĂN PHONG: giọng giảng viên trung tính, mạch lạc, câu ngắn thuận tai; dùng "chúng ta" cho inclusive we.',
       'Số/ký hiệu viết thành chữ như cách người Việt đọc, ví dụ "O(n)" -> "ô của en".',
       '',
       'CHỈ trả về JSON, không kèm giải thích, không bọc trong code fence, đúng dạng:',
@@ -185,6 +266,92 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       return g.id + '\t[tối đa ' + cap + ' âm tiết]\t' + g.en;
     });
     return 'CÂU CẦN DỊCH (id, hạn mức, nội dung):\n' + lines.join('\n');
+  }
+
+  function buildCompactUserPrompt(rows) {
+    const lines = rows.map((row) => (
+      row.id + '\t[tối đa ' + row.max + ' âm tiết]\tEN: ' + row.en + '\tVI hiện tại: ' + row.vi
+    ));
+    return [
+      'RÚT GỌN CÁC CÂU SAU ĐỂ VỪA THỜI LƯỢNG.',
+      'Giữ nguyên nghĩa học thuật, thuật ngữ, phủ định, điều kiện, số liệu và quan hệ logic.',
+      'Chỉ bỏ từ đệm hoặc diễn đạt cô đọng hơn; không tóm tắt mất ý.',
+      'CHỈ trả JSON dạng {"segments":[{"id":1,"vi":"..."}]}.',
+      '',
+      lines.join('\n'),
+    ].join('\n');
+  }
+
+  function buildReviewSystemPrompt(rate, terminology) {
+    terminology = terminology || {};
+    const glossaryLines = Array.isArray(terminology.terms) && terminology.terms.length
+      ? terminology.terms.map((term) => '  ' + term.source + ' [' + term.action + '] -> ' + term.target).join('\n')
+      : '  (không có)';
+    return [
+      'Bạn là biên tập viên độc lập kiểm định bản dịch bài giảng Anh-Việt.',
+      'Lĩnh vực: ' + (terminology.subject || 'tự xác định từ nội dung') + '.',
+      '',
+      'Đối chiếu từng câu EN-VI và tự sửa khi cần:',
+      '- Phát hiện nghĩa sai theo ngữ cảnh, false friend, dịch từng chữ và thuật ngữ không tự nhiên.',
+      '- Bảo toàn phủ định, điều kiện, số liệu, định nghĩa, quan hệ logic và mức độ chắc chắn.',
+      '- Dùng glossary để giữ nhất quán, nhưng xem đây là bản nháp tự động: sửa cách dịch nếu glossary mâu thuẫn với câu gốc hoặc ngữ cảnh ngành.',
+      '- Không chấp nhận bản dịch đen của nhãn ẩn dụ, idiom, tên pattern hay tên khái niệm nếu giới chuyên môn thường giữ canonical English.',
+      '- Viết như giảng viên Việt Nam nói, không như bản dịch máy.',
+      '- Không thêm kiến thức, giải thích hoặc ý không có trong câu gốc.',
+      '- Tôn trọng hạn mức âm tiết; chỉ rút gọn cách diễn đạt, không bỏ ý chính.',
+      '',
+      'GLOSSARY TỰ ĐỘNG CỦA BÀI:',
+      glossaryLines,
+      '',
+      'Tốc độ tham chiếu: ' + rate + ' âm tiết/giây.',
+      'Trả lại TẤT CẢ id được cung cấp, kể cả câu không cần sửa.',
+      'CHỈ trả JSON dạng {"segments":[{"id":1,"vi":"..."}]}.',
+    ].join('\n');
+  }
+
+  function buildReviewUserPrompt(rows) {
+    return 'CÂU CẦN KIỂM ĐỊNH:\n' + rows.map((row) => (
+      row.id + '\t[tối đa ' + row.max + ' âm tiết]\tEN: ' + row.en + '\tVI: ' + row.vi
+    )).join('\n');
+  }
+
+  function buildGlossaryCompliancePrompt(rows, terms) {
+    const termLines = terms.map((term) => '  ' + term.source + ' -> ' + term.target).join('\n');
+    const rowLines = rows.map((row) => (
+      row.id + '\tEN: ' + row.en + '\tVI hiện tại: ' + row.vi
+    )).join('\n');
+    return [
+      'SỬA CÁC CÂU SAU ĐỂ KHÔI PHỤC CANONICAL TERM BẮT BUỘC.',
+      'Giữ nguyên nghĩa, phủ định, số liệu và thời lượng gần nhất có thể.',
+      'Không thêm giải thích. Chỉ thay phần thuật ngữ sai hoặc bị dịch đen.',
+      'CANONICAL TERM PHẢI GIỮ:',
+      termLines,
+      '',
+      'CÂU CẦN SỬA:',
+      rowLines,
+      '',
+      'CHỈ trả JSON dạng {"segments":[{"id":1,"vi":"..."}]}.',
+    ].join('\n');
+  }
+
+  function buildTerminologyReviewSystemPrompt() {
+    return [
+      'Bạn là biên tập viên thuật ngữ học thuật Anh-Việt độc lập.',
+      'Kiểm định glossary tự sinh cho một bài giảng trước khi dùng để dịch.',
+      '',
+      'Chỉ giữ thuật ngữ chính xác và thực sự hữu ích. Sửa hoặc bỏ mục sai ngữ cảnh.',
+      'Không chấp nhận dịch đen nhãn ẩn dụ, idiom, tên pattern hoặc khái niệm có canonical English được giới chuyên môn Việt Nam dùng.',
+      'Tự kiểm tra độ tự nhiên: nếu target nghe như hình ảnh đen, từ phổ thông ghép máy móc hoặc văn dịch, đặt action="keep" và target bằng source.',
+      'Nếu không chắc bản dịch Việt là cách dùng thật của ngành, đặt action="keep" và dùng canonical English ở target.',
+      'Không thêm kiến thức ngoài transcript.',
+      '',
+      'CHỈ trả JSON đúng dạng:',
+      '{"subject":"lĩnh vực cụ thể","terms":[{"source":"English term","target":"cách dùng thống nhất","action":"keep|translate"}]}',
+    ].join('\n');
+  }
+
+  function buildTerminologyReviewUserPrompt(terminology) {
+    return 'GLOSSARY CẦN KIỂM ĐỊNH:\n' + JSON.stringify(terminology || { subject: '', terms: [] });
   }
 
   /** Trích JSON khoan dung: bỏ code fence, tìm khối {...} hoặc [...] đầu tiên hợp lệ. */
@@ -230,7 +397,12 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   DUB.plan = {
     STRETCH_MIN, STRETCH_MAX, DEFAULT_RATE,
     countViSyllables, cuesToSentences, buildPlan, chunkSegments,
-    buildTranslateSystemPrompt, buildTranslateUserPrompt,
+    buildTerminologySystemPrompt, buildTerminologyUserPrompt, buildTerminologyRetryUserPrompt,
+    parseTerminologyResponse,
+    buildTerminologyReviewSystemPrompt, buildTerminologyReviewUserPrompt,
+    buildTranslateSystemPrompt, buildTranslateUserPrompt, buildCompactUserPrompt,
+    buildReviewSystemPrompt, buildReviewUserPrompt,
+    buildGlossaryCompliancePrompt,
     extractJson, parseTranslationResponse, verifyPlan,
   };
 })();

@@ -1,26 +1,22 @@
 /**
  * Service worker — điều phối job lồng tiếng:
- *   plan (lib/plan.js) -> dịch qua LLM API (OpenAI-compatible) -> gửi sang
+ *   plan (lib/plan.js) -> dịch qua Gemini API chính thức -> gửi sang
  *   TTS server (server/, http://127.0.0.1:18765 mặc định) -> trả audio về
  *   content script qua Port.
  *
- * Chỉ hai lời gọi mạng từ EXTENSION: API dịch (bắt buộc, do người dùng cấu
- * hình) và TTS server trên chính máy này. Audio/video không bao giờ rời
- * máy. TTS server tự gọi thêm một mạng thứ ba: gTTS gửi văn bản đã dịch ra
- * ngoài để đọc (xem server/README.md mục "gTTS").
+ * Extension chỉ gọi API dịch do người dùng cấu hình và TTS server trên
+ * chính máy này. Kokoro chạy local; audio/video và bản dịch không được gửi
+ * tới dịch vụ giọng nói bên ngoài.
  *
  * Không dùng "type":"module" trong manifest nên nạp lib bằng importScripts —
  * đúng chuẩn MV3 cho service worker cổ điển, không cần build step.
  */
-importScripts('lib/vtt.js', 'lib/glossary.js', 'lib/plan.js');
+importScripts('lib/vtt.js', 'lib/plan.js');
 
 const DEFAULT_SETTINGS = {
-  // Dịch — theo đúng pattern OpenAI-compatible: base URL + API key + model.
-  apiBaseUrl: 'https://api.openai.com/v1',
-  apiKey: '',
-  model: '',
+  // Dịch qua Gemini API chính thức. Model cố định để tối ưu độ ổn định/quota.
+  geminiApiKey: '',
   timeoutMs: 30000,
-  sendSystemRole: true,
 
   // TTS server (server/, xem server/README.md) — serverApiKey BẮT BUỘC:
   // server từ chối khởi động nếu chưa đặt API_KEY, nên mọi request đều cần
@@ -29,40 +25,82 @@ const DEFAULT_SETTINGS = {
   serverApiKey: '',
   voice: '',
 
-  // Hiệu chỉnh sync — đo thật, không phải giá trị mượn.
-  // gTTS đo được 3.0-3.036 âm tiết/giây (đo trên 2 job thật, xem server/README.md).
-  viSyllablesPerSec: 3.0,
+  // Baseline ban đầu; server trả tốc độ đo thật sau mỗi job để hiệu chỉnh.
+  viSyllablesPerSec: 2.6,
 
-  planVersion: 'v1',
+  planVersion: 'gemini-v2',
 };
+
+const GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
-const TRANSLATE_MAX_TOKENS = 6000;
+const TRANSLATE_MAX_TOKENS = 2400;
 const TRANSLATE_CHUNK_SIZE = 25;
-// Số chunk dịch chạy song song. Cao hơn = nhanh hơn nhưng dễ dính 429 rate
-// limit (Gemini free tier ~10 request/phút). 429 có retry backoff nhưng chậm.
-const TRANSLATE_CONCURRENCY = 4;
+// Tuần tự để tương thích các gói có TPM thấp; mỗi request vẫn hoàn tất nhanh.
+const TRANSLATE_CONCURRENCY = 1;
+let apiCooldownUntil = 0;
 
 /** Log vào console của service worker: chrome://extensions -> "service worker". */
 function log(...args) { console.log('[dub]', ...args); }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+function outputTokenBudget(rows, floor = 500, ceiling = TRANSLATE_MAX_TOKENS) {
+  const syllables = rows.reduce((sum, row) => sum + Number(row.budget && row.budget.max || row.max || 0), 0);
+  return Math.min(ceiling, Math.max(floor, syllables * 2 + 120));
+}
+
+function reviewTokenBudget(rows, floor = 400, ceiling = 1200) {
+  const characters = rows.reduce((sum, row) => sum + String(row.vi || row.en || '').length, 0);
+  return Math.min(ceiling, Math.max(floor, Math.ceil(characters / 3) + 160));
+}
+
+function retryDelayMs(response, rawBody, fallbackMs) {
+  const retryAfter = response.headers.get('retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.max(fallbackMs, seconds * 1000 + 500);
+    const timestamp = Date.parse(retryAfter);
+    if (Number.isFinite(timestamp)) return Math.max(fallbackMs, timestamp - Date.now() + 500);
+  }
+  const match = String(rawBody).match(/(?:try again|retry) in\s+([\d.]+)\s*(ms|s)|retryDelay["\s:]+["']?([\d.]+)s/i);
+  if (!match) return fallbackMs;
+  const amount = Number(match[1] || match[3]);
+  const unit = match[2] || 's';
+  return Math.max(fallbackMs, amount * (unit.toLowerCase() === 'ms' ? 1 : 1000) + 500);
+}
+
+async function waitForApiCooldown() {
+  const remaining = apiCooldownUntil - Date.now();
+  if (remaining > 0) await sleep(remaining);
+}
+
 async function loadSettings() {
   const stored = await chrome.storage.local.get('settings');
-  return { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  const settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  let changed = false;
+  if (settings.planVersion !== DEFAULT_SETTINGS.planVersion) {
+    settings.planVersion = DEFAULT_SETTINGS.planVersion;
+    settings.viSyllablesPerSec = DEFAULT_SETTINGS.viSyllablesPerSec;
+    if (settings.voice === 'vi') settings.voice = '';
+    delete settings.apiBaseUrl;
+    delete settings.apiKey;
+    delete settings.model;
+    delete settings.reviewModel;
+    delete settings.sendSystemRole;
+    changed = true;
+  }
+  if (changed) await chrome.storage.local.set({ settings });
+  return settings;
 }
 
 // ---------------------------------------------------------------------------
-// Client OpenAI-compatible — cùng pattern base URL/apiKey/model/retry như
-// công cụ prompt_optimizer đã dùng: POST {baseUrl}/chat/completions,
-// Authorization: Bearer <key>, JSON qua payload.choices[0].message.content.
+// Gemini API chính thức: POST models/{model}:generateContent?key=...
 // ---------------------------------------------------------------------------
 
-/** Rút gọn thông báo lỗi HTTP — hiểu cả 2 format hay gặp: OpenAI-style
- * {"error":{"message"}} (API dịch) và FastAPI-style {"detail"} (TTS server,
- * dùng cho lỗi thiếu/sai X-API-Key). Không khớp cái nào thì in nguyên văn. */
+/** Rút gọn lỗi Gemini/FastAPI về thông báo đủ ngắn cho UI. */
 function buildErrorDetail(status, rawBody) {
   try {
     const parsed = JSON.parse(rawBody);
@@ -73,86 +111,186 @@ function buildErrorDetail(status, rawBody) {
   return trimmed ? `HTTP ${status}: ${trimmed.slice(0, 300)}` : `HTTP ${status}`;
 }
 
-async function chatComplete({ apiBaseUrl, apiKey, model, timeoutMs, sendSystemRole }, systemPrompt, userPrompt) {
-  const url = apiBaseUrl.replace(/\/+$/, '') + '/chat/completions';
-  const messages = sendSystemRole !== false
-    ? [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }]
-    : [{ role: 'user', content: systemPrompt + '\n\n---\n\n' + userPrompt }];
+function logGeminiTest(level, message, data) {
+  const logger = console[level] || console.log;
+  logger(`[dub] Gemini test ${message}`, data);
+}
 
-  const body = JSON.stringify({ model, messages, temperature: 0.3, max_tokens: TRANSLATE_MAX_TOKENS });
+function responsePreview(raw) {
+  return String(raw).slice(0, 4000);
+}
+
+function geminiText(payload) {
+  const candidate = payload.candidates && payload.candidates[0];
+  const parts = candidate && candidate.content && candidate.content.parts;
+  return Array.isArray(parts)
+    ? parts.filter((part) => !part.thought && typeof part.text === 'string').map((part) => part.text).join('')
+    : '';
+}
+
+async function chatComplete({ geminiApiKey, timeoutMs }, systemPrompt, userPrompt, maxTokens = TRANSLATE_MAX_TOKENS, options = {}) {
+  const url = `${GEMINI_API_ROOT}/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: maxTokens,
+      responseMimeType: 'application/json',
+    },
+  });
 
   let lastErr;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    await waitForApiCooldown();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
       res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        headers: { 'Content-Type': 'application/json' },
         body,
         signal: controller.signal,
       });
     } catch (e) {
       clearTimeout(timer);
-      if (e && e.name === 'AbortError') throw new Error('Hết thời gian chờ API dịch (timeout)');
-      throw new Error('Lỗi mạng khi gọi API dịch: ' + (e && e.message ? e.message : String(e)));
+      const detail = e && e.name === 'AbortError'
+        ? 'Hết thời gian chờ API dịch (timeout)'
+        : 'Lỗi mạng khi gọi API dịch: ' + (e && e.message ? e.message : String(e));
+      if (options.debugLabel) {
+        logGeminiTest('error', 'network failure', { model: GEMINI_MODEL, attempt, error: detail });
+      }
+      throw new Error(detail);
     }
     clearTimeout(timer);
 
     if (res.ok) {
       const raw = await res.text();
       let payload;
-      try { payload = JSON.parse(raw); } catch (e) { throw new Error('Phản hồi API dịch không phải JSON: ' + raw.slice(0, 200)); }
-      if (payload.error && payload.error.message) throw new Error('API dịch báo lỗi: ' + payload.error.message);
-      const content = payload.choices && payload.choices[0] && payload.choices[0].message && payload.choices[0].message.content;
-      if (typeof content !== 'string' || !content.length) throw new Error('API dịch trả về rỗng (thiếu content)');
+      try {
+        payload = JSON.parse(raw);
+      } catch (e) {
+        if (options.debugLabel) {
+          logGeminiTest('error', 'non-JSON response', {
+            model: GEMINI_MODEL, attempt, status: res.status, response: responsePreview(raw),
+          });
+        }
+        throw new Error('Phản hồi API dịch không phải JSON: ' + raw.slice(0, 200));
+      }
+      if (payload.error && payload.error.message) {
+        if (options.debugLabel) {
+          logGeminiTest('error', 'error payload with HTTP 2xx', {
+            model: GEMINI_MODEL, attempt, status: res.status, response: payload,
+          });
+        }
+        throw new Error('API dịch báo lỗi: ' + payload.error.message);
+      }
+      const content = geminiText(payload);
+      if (typeof content !== 'string' || !content.length) {
+        if (options.debugLabel) {
+          logGeminiTest('error', 'missing candidate content', {
+            model: GEMINI_MODEL, attempt, status: res.status, response: payload,
+          });
+        }
+        throw new Error('API dịch trả về rỗng (thiếu content)');
+      }
+      if (options.debugLabel) {
+        logGeminiTest('log', 'completed', {
+          model: GEMINI_MODEL, attempt, status: res.status, content, response: payload,
+        });
+      }
       return content;
     }
 
     const errBody = await res.text().catch(() => '');
     const detail = buildErrorDetail(res.status, errBody);
     lastErr = new Error(detail);
-    if (res.status === 401) throw new Error('API key sai hoặc hết hạn — ' + detail);
+    if (options.debugLabel) {
+      logGeminiTest('error', 'HTTP failure', {
+        model: GEMINI_MODEL, attempt, status: res.status, response: responsePreview(errBody),
+      });
+    }
+    if (res.status === 401 || res.status === 403) throw new Error('Gemini API key sai, bị hạn chế hoặc hết hạn — ' + detail);
     if (!RETRYABLE_STATUSES.has(res.status) || attempt === MAX_ATTEMPTS) throw lastErr;
-    console.warn(`[dub] API dịch lỗi (lần ${attempt}/${MAX_ATTEMPTS}): ${detail} — thử lại sau ${2 ** (attempt - 1)}s`);
-    await sleep(1000 * 2 ** (attempt - 1));
+    const fallbackMs = 1000 * 2 ** (attempt - 1) + Math.round(Math.random() * 400);
+    const delayMs = retryDelayMs(res, errBody, fallbackMs);
+    if (res.status === 429) apiCooldownUntil = Math.max(apiCooldownUntil, Date.now() + delayMs);
+    const label = res.status === 429 ? 'API dịch chạm rate limit' : 'API dịch lỗi tạm thời';
+    console.warn(`[dub] ${label} (lần ${attempt}/${MAX_ATTEMPTS}): ${detail} — chờ ${(delayMs / 1000).toFixed(1)}s`);
+    await sleep(delayMs);
   }
   throw lastErr || new Error('Gọi API dịch thất bại không rõ lý do');
 }
 
-async function fetchModels({ baseUrl, apiKey, timeoutMs }) {
-  const url = baseUrl.replace(/\/+$/, '') + '/models';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
-  let res;
+async function testGemini({ geminiApiKey, timeoutMs }) {
+  const config = { geminiApiKey, timeoutMs: timeoutMs || 15000 };
   try {
-    res = await fetch(url, {
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-      signal: controller.signal,
+    const content = await chatComplete(
+      config,
+      'Chỉ trả JSON object {"ok":true}.',
+      'Kiểm tra kết nối Gemini.',
+      32,
+      { debugLabel: 'manual' },
+    );
+    const parsed = DUB.plan.extractJson(content);
+    if (!parsed || parsed.ok !== true) throw new Error('Gemini không trả JSON kiểm tra hợp lệ');
+    return GEMINI_MODEL;
+  } catch (error) {
+    logGeminiTest('error', 'failed', {
+      model: GEMINI_MODEL, error: error && error.message ? error.message : String(error),
     });
-  } finally { clearTimeout(timer); }
-  if (!res.ok) throw new Error(buildErrorDetail(res.status, await res.text().catch(() => '')));
-  const payload = await res.json();
-  const ids = (payload.data || []).map((m) => m.id).filter((id) => typeof id === 'string');
-  return ids.sort();
+    throw error;
+  }
 }
 
-async function testModel({ baseUrl, apiKey, model, timeoutMs }) {
-  const content = await chatComplete(
-    { apiBaseUrl: baseUrl, apiKey, model, timeoutMs: timeoutMs || 15000, sendSystemRole: false },
-    'Trả lời đúng một từ: OK', 'OK'
+// ---------------------------------------------------------------------------
+// Dịch toàn bộ plan — chia chunk để tránh phản hồi quá dài bị cắt cụt. Số
+// worker mặc định là 1 để không vượt TPM của các gói API thấp.
+// ---------------------------------------------------------------------------
+
+async function analyzeTerminology(plan, settings) {
+  let terminology;
+  try {
+    const raw = await chatComplete(
+      settings,
+      DUB.plan.buildTerminologySystemPrompt(),
+      DUB.plan.buildTerminologyUserPrompt(plan.segments),
+      700,
+    );
+    terminology = DUB.plan.parseTerminologyResponse(raw);
+  } catch (firstError) {
+    const raw = await chatComplete(
+      settings,
+      DUB.plan.buildTerminologySystemPrompt(),
+      DUB.plan.buildTerminologyRetryUserPrompt(plan.segments),
+      450,
+    );
+    try {
+      terminology = DUB.plan.parseTerminologyResponse(raw);
+    } catch (secondError) {
+      throw new Error(`Glossary không hợp lệ sau 2 lần thử: ${secondError.message}; lần đầu: ${firstError.message}`);
+    }
+  }
+  const transcript = plan.segments.map((segment) => segment.en).join(' ').toLocaleLowerCase('en');
+  return {
+    subject: terminology.subject,
+    terms: terminology.terms.filter((term) => transcript.includes(term.source.toLocaleLowerCase('en'))),
+  };
+}
+
+async function reviewTerminology(terminology, settings) {
+  const raw = await chatComplete(
+    settings,
+    DUB.plan.buildTerminologyReviewSystemPrompt(),
+    DUB.plan.buildTerminologyReviewUserPrompt(terminology),
+    700,
   );
-  return content.trim().slice(0, 120);
+  return DUB.plan.parseTerminologyResponse(raw);
 }
 
-// ---------------------------------------------------------------------------
-// Dịch toàn bộ plan — chia chunk để tránh phản hồi quá dài bị cắt cụt; các
-// chunk chạy song song (TRANSLATE_CONCURRENCY) để rút ngắn thời gian chờ.
-// ---------------------------------------------------------------------------
-
-async function translatePlan(plan, settings, onProgress) {
-  const system = DUB.plan.buildTranslateSystemPrompt(settings.viSyllablesPerSec);
+async function translatePlan(plan, settings, terminology, onProgress) {
+  const system = DUB.plan.buildTranslateSystemPrompt(settings.viSyllablesPerSec, terminology);
   const chunks = DUB.plan.chunkSegments(plan.segments, TRANSLATE_CHUNK_SIZE);
   const results = new Array(chunks.length);
   const workers = Math.min(TRANSLATE_CONCURRENCY, chunks.length);
@@ -170,7 +308,7 @@ async function translatePlan(plan, settings, onProgress) {
       const user = DUB.plan.buildTranslateUserPrompt(segs);
       const t = Date.now();
       log(`chunk ${i + 1}/${chunks.length} gửi đi — ${segs.length} câu, ${user.length} ký tự`);
-      const raw = await chatComplete(settings, system, user);
+      const raw = await chatComplete(settings, system, user, outputTokenBudget(segs, 600));
       const parsed = DUB.plan.parseTranslationResponse(raw);
       results[i] = parsed;
       doneCount += parsed.length;
@@ -183,20 +321,131 @@ async function translatePlan(plan, settings, onProgress) {
     }
   }
 
-  // Promise.all: worker đầu tiên ném lỗi thì cả translatePlan ném theo, giống
-  // hành vi cũ — không nuốt lỗi, job dừng chứ không trả bản dịch thiếu.
+  // Worker đầu tiên ném lỗi thì toàn bộ job dừng, không cache kết quả thiếu.
   await Promise.all(Array.from({ length: workers }, worker));
 
   const all = results.flat();
+  const expectedIds = new Set(plan.segments.map((segment) => segment.id));
+  const returnedIds = all.map((segment) => segment.id);
+  const missingIds = [...expectedIds].filter((id) => !returnedIds.includes(id));
+  const invalidIds = returnedIds.filter((id) => !expectedIds.has(id));
+  const duplicateIds = returnedIds.filter((id, index) => returnedIds.indexOf(id) !== index);
+  if (missingIds.length || invalidIds.length || duplicateIds.length) {
+    throw new Error(
+      `Bản dịch không đầy đủ (thiếu: ${missingIds.join(', ') || 'không'}; ` +
+      `sai ID: ${invalidIds.join(', ') || 'không'}; trùng: ${duplicateIds.join(', ') || 'không'})`,
+    );
+  }
   log(`dịch xong ${all.length}/${plan.segments.length} câu trong ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   return all;
 }
 
+async function reviewTranslations(plan, translated, settings, terminology, onProgress) {
+  const sourceById = new Map(plan.segments.map((segment) => [segment.id, segment]));
+  const rows = translated.map((segment) => ({
+    id: segment.id,
+    en: sourceById.get(segment.id).en,
+    vi: segment.vi,
+    max: sourceById.get(segment.id).budget.max,
+  }));
+  const chunks = DUB.plan.chunkSegments(rows, TRANSLATE_CHUNK_SIZE);
+  const reviewed = new Map();
+  let cursor = 0;
+  let done = 0;
+
+  async function worker() {
+    for (let index = cursor++; index < chunks.length; index = cursor++) {
+      const raw = await chatComplete(
+        settings,
+        DUB.plan.buildReviewSystemPrompt(settings.viSyllablesPerSec, terminology),
+        DUB.plan.buildReviewUserPrompt(chunks[index]),
+        reviewTokenBudget(chunks[index]),
+      );
+      const parsed = DUB.plan.parseTranslationResponse(raw);
+      const expectedIds = new Set(chunks[index].map((row) => row.id));
+      for (const segment of parsed) {
+        if (expectedIds.has(segment.id) && segment.vi.trim()) reviewed.set(segment.id, segment.vi.trim());
+      }
+      done++;
+      if (onProgress) onProgress(done, chunks.length);
+    }
+  }
+
+  const workerCount = Math.min(TRANSLATE_CONCURRENCY, chunks.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+
+  return translated.map((segment) => (
+    reviewed.has(segment.id) ? { ...segment, vi: reviewed.get(segment.id) } : segment
+  ));
+}
+
+async function enforceKeptTerms(plan, translated, settings, terminology) {
+  const keptTerms = (terminology.terms || []).filter((term) => term.action === 'keep');
+  if (!keptTerms.length) return translated;
+
+  const sourceById = new Map(plan.segments.map((segment) => [segment.id, segment]));
+  const rows = translated.map((segment) => {
+    const source = sourceById.get(segment.id);
+    const required = keptTerms.filter((term) => (
+      source.en.toLocaleLowerCase('en').includes(term.source.toLocaleLowerCase('en'))
+      && !segment.vi.toLocaleLowerCase('en').includes(term.target.toLocaleLowerCase('en'))
+    ));
+    return required.length ? {
+      id: segment.id,
+      en: source.en,
+      vi: segment.vi,
+      max: source.budget.max,
+      required,
+    } : null;
+  }).filter(Boolean);
+  if (!rows.length) return translated;
+
+  const terms = [...new Map(rows.flatMap((row) => row.required).map((term) => [term.source, term])).values()];
+  const raw = await chatComplete(
+    settings,
+    DUB.plan.buildReviewSystemPrompt(settings.viSyllablesPerSec, terminology),
+    DUB.plan.buildGlossaryCompliancePrompt(rows, terms),
+    reviewTokenBudget(rows, 400, 1000),
+  );
+  const replacements = new Map(DUB.plan.parseTranslationResponse(raw).map((segment) => [segment.id, segment.vi]));
+  return translated.map((segment) => (
+    replacements.has(segment.id) ? { ...segment, vi: replacements.get(segment.id) } : segment
+  ));
+}
+
+async function compactOverflowTranslations(plan, translated, settings, terminology) {
+  const verification = DUB.plan.verifyPlan(plan, translated, settings.viSyllablesPerSec);
+  const overflow = verification.rows.filter((row) => row.status === 'VƯỢT');
+  if (!overflow.length) return translated;
+
+  const byId = new Map(plan.segments.map((segment) => [segment.id, segment]));
+  const rows = overflow.map((row) => ({
+    id: row.id,
+    en: row.en,
+    vi: row.vi,
+    max: byId.get(row.id).budget.max,
+  }));
+  const raw = await chatComplete(
+    settings,
+    DUB.plan.buildTranslateSystemPrompt(settings.viSyllablesPerSec, terminology),
+    DUB.plan.buildCompactUserPrompt(rows),
+    outputTokenBudget(rows, 300, 1600),
+  );
+  const compacted = DUB.plan.parseTranslationResponse(raw);
+  const originalById = new Map(translated.map((segment) => [segment.id, segment.vi]));
+  const replacements = new Map(compacted
+    .filter((segment) => {
+      const original = originalById.get(segment.id);
+      return original && DUB.plan.countViSyllables(segment.vi) < DUB.plan.countViSyllables(original);
+    })
+    .map((segment) => [segment.id, segment.vi]));
+  return translated.map((segment) => (
+    replacements.has(segment.id) ? { ...segment, vi: replacements.get(segment.id) } : segment
+  ));
+}
+
 // ---------------------------------------------------------------------------
-// TTS server local — hợp đồng API mô tả trong server/README.md. Server chỉ
-// đòi hỏi header X-API-Key khi tự bật biến môi trường API_KEY (mặc định
-// không) — apiKey rỗng thì authHeaders() trả object rỗng, không đổi hành
-// vi so với trước khi có tính năng này.
+// TTS server local — hợp đồng API mô tả trong server/README.md.
 // ---------------------------------------------------------------------------
 
 function authHeaders(apiKey) {
@@ -239,6 +488,19 @@ async function previewVoice(serverUrl, apiKey, text, voice, timeoutMs) {
   const mime = res.headers.get('content-type') || 'audio/wav';
   const buf = await res.arrayBuffer();
   return { base64: arrayBufferToBase64(buf), mime };
+}
+
+async function saveDebugTranscript(settings, payload) {
+  const url = settings.serverUrl.replace(/\/+$/, '') + '/api/debug/transcript';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(settings.serverApiKey) },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw new Error(buildErrorDetail(res.status, await res.text().catch(() => '')));
+  }
+  return res.json();
 }
 
 async function ttsSynthesize(plan, translated, settings) {
@@ -315,18 +577,72 @@ function post(port, type, data) {
 
 async function runJob(msg, port) {
   const settings = await loadSettings();
-  if (!settings.apiKey) throw new Error('Chưa cấu hình API key trong Cài đặt extension');
-  if (!settings.model) throw new Error('Chưa chọn model dịch trong Cài đặt extension');
+  if (!settings.geminiApiKey) throw new Error('Chưa cấu hình Gemini API key trong Cài đặt extension');
+  const reviewerSettings = settings;
 
   const tJob = Date.now();
   post(port, 'PROGRESS', { stage: 'plan', pct: 5, note: 'Đang dựng timeline...' });
   const plan = DUB.plan.buildPlan(msg.cues, msg.durationSec, { viSyllablesPerSec: settings.viSyllablesPerSec });
-  log(`plan: ${msg.cues.length} cue -> ${plan.segments.length} câu | video ${msg.durationSec}s | model=${settings.model}`);
+  log(`plan: ${msg.cues.length} cue -> ${plan.segments.length} câu | video ${msg.durationSec}s | model=${GEMINI_MODEL}`);
+
+  let terminologyDraft = { subject: '', terms: [] };
+  let terminology = terminologyDraft;
+  let terminologyError = '';
+  let terminologyReviewError = '';
+  post(port, 'PROGRESS', { stage: 'terminology', pct: 8, note: 'Đang phân tích lĩnh vực và thuật ngữ...' });
+  try {
+    terminologyDraft = await analyzeTerminology(plan, settings);
+    terminology = terminologyDraft;
+    post(port, 'PROGRESS', { stage: 'terminology', pct: 10, note: 'Đang kiểm định thuật ngữ chuyên ngành...' });
+    try {
+      terminology = await reviewTerminology(terminologyDraft, reviewerSettings);
+    } catch (error) {
+      terminologyReviewError = error && error.message ? error.message : String(error);
+      console.warn('[dub] không kiểm định lại được glossary, dùng bản phân tích đầu:', error);
+    }
+    log(`thuật ngữ: lĩnh vực=${terminology.subject || '?'} | ${terminology.terms.length} mục`);
+  } catch (error) {
+    terminologyError = error && error.message ? error.message : String(error);
+    console.warn('[dub] không tạo được glossary riêng, dùng quy tắc nền:', error);
+  }
 
   post(port, 'PROGRESS', { stage: 'translate', pct: 12, note: `Đang dịch ${plan.segments.length} câu...` });
-  const translated = await translatePlan(plan, settings, (done, total) => {
-    post(port, 'PROGRESS', { stage: 'translate', pct: 12 + Math.round((done / total) * 38), note: `Dịch ${done}/${total} câu` });
-  });
+  let translated;
+  let draftTranslation = [];
+  let reviewedTranslation = [];
+  try {
+    translated = await translatePlan(plan, settings, terminology, (done, total) => {
+      post(port, 'PROGRESS', { stage: 'translate', pct: 12 + Math.round((done / total) * 38), note: `Dịch ${done}/${total} câu` });
+    });
+    draftTranslation = translated.map((segment) => ({ ...segment }));
+    post(port, 'PROGRESS', { stage: 'review', pct: 49, note: 'Đang đối chiếu bản dịch với câu gốc...' });
+    try {
+      translated = await reviewTranslations(plan, translated, reviewerSettings, terminology, (done, total) => {
+        post(port, 'PROGRESS', { stage: 'review', pct: 49 + Math.round((done / total) * 3), note: `Đang review bản dịch ${done}/${total}...` });
+      });
+    } catch (error) {
+      console.warn('[dub] review bản dịch thất bại, giữ bản dịch đầu:', error);
+    }
+    try {
+      translated = await enforceKeptTerms(plan, translated, reviewerSettings, terminology);
+    } catch (error) {
+      console.warn('[dub] không khôi phục được canonical term, giữ bản review:', error);
+    }
+    reviewedTranslation = translated.map((segment) => ({ ...segment }));
+
+    const beforeCompact = DUB.plan.verifyPlan(plan, translated, settings.viSyllablesPerSec).overflowCount;
+    if (beforeCompact > 0) {
+      post(port, 'PROGRESS', { stage: 'translate', pct: 51, note: `Đang rút gọn ${beforeCompact} câu dài...` });
+      try {
+        translated = await compactOverflowTranslations(plan, translated, settings, terminology);
+      } catch (error) {
+        console.warn('[dub] không rút gọn lại được câu dài, giữ bản dịch đầu:', error);
+      }
+    }
+  } catch (error) {
+    const detail = error && error.message ? error.message : String(error);
+    throw new Error('API dịch thất bại: ' + detail);
+  }
 
   const verify = DUB.plan.verifyPlan(plan, translated, settings.viSyllablesPerSec);
   log(`verify: ${verify.overflowCount}/${verify.total} câu vượt hạn mức âm tiết`);
@@ -342,6 +658,32 @@ async function runJob(msg, port) {
     return { id: s.id, start: s.start, end: s.end, vi: vi ? vi.vi : '', en: s.en || '' };
   });
 
+  post(port, 'PROGRESS', { stage: 'debug', pct: 53, note: 'Đang lưu transcript debug...' });
+  try {
+    const debug = await saveDebugTranscript(settings, {
+      videoId: msg.videoId,
+      model: GEMINI_MODEL,
+      reviewModel: GEMINI_MODEL,
+      apiBaseUrl: GEMINI_API_ROOT,
+      durationSec: msg.durationSec,
+      planVersion: settings.planVersion,
+      viSyllablesPerSec: settings.viSyllablesPerSec,
+      sourceCues: msg.cues,
+      plan,
+      terminologyDraft,
+      terminology,
+      terminologyError,
+      terminologyReviewError,
+      draftTranslation,
+      reviewedTranslation,
+      finalTranslation: translated,
+      verification: verify,
+    });
+    log(`transcript debug: ${debug.path} | tự xoá sau ${debug.retentionDays} ngày`);
+  } catch (error) {
+    console.warn('[dub] không lưu được transcript debug, job vẫn tiếp tục:', error);
+  }
+
   post(port, 'PROGRESS', { stage: 'synthesize', pct: 55, note: 'Đang gửi tới TTS server...' });
   const tTts = Date.now();
   const jobId = await ttsSynthesize(plan, translated, settings);
@@ -355,7 +697,7 @@ async function runJob(msg, port) {
   const { base64, mime } = await fetchAudioAsBase64(done.audioUrl, settings.serverUrl, settings.serverApiKey);
 
   post(port, 'DONE', {
-    plan, translated, verify, subtitles,
+    plan, terminology, translated, verify, subtitles,
     audioBase64: base64, audioMime: mime,
     measuredSyllablesPerSec: done.measuredSyllablesPerSec || null,
   });
@@ -392,19 +734,38 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // ---------------------------------------------------------------------------
-// Messages một-lượt cho trang Options: kiểm thử/nạp danh sách model dịch,
-// xin quyền origin cho base URL tuỳ ý người dùng nhập
-// (optional_host_permissions), kiểm tra/nạp danh sách giọng của TTS server.
+// Messages một-lượt cho trang Options, content script và TTS server.
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'FETCH_MODELS') {
-    fetchModels(msg.config).then((models) => sendResponse({ ok: true, models }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
+  if (msg.type === 'GET_CONTENT_SETTINGS') {
+    loadSettings().then((settings) => {
+      const { geminiApiKey, ...contentSettings } = settings;
+      sendResponse({ ok: true, settings: contentSettings });
+    })
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
-  if (msg.type === 'TEST_MODEL') {
-    testModel(msg.config).then((reply) => sendResponse({ ok: true, reply }))
+  if (msg.type === 'PATCH_CONTENT_SETTINGS') {
+    (async () => {
+      try {
+        const current = await loadSettings();
+        const requestedPatch = msg.patch && typeof msg.patch === 'object' ? msg.patch : {};
+        const allowedKeys = ['subtitlesOn', 'subtitleOffsetX', 'subtitleOffsetY', 'voice'];
+        const patch = Object.fromEntries(
+          Object.entries(requestedPatch).filter(([key]) => allowedKeys.includes(key)),
+        );
+        const settings = { ...current, ...patch };
+        await chrome.storage.local.set({ settings });
+        sendResponse({ ok: true });
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+  if (msg.type === 'TEST_GEMINI') {
+    testGemini(msg.config).then((model) => sendResponse({ ok: true, model }))
       .catch((e) => sendResponse({ ok: false, error: e.message }));
     return true;
   }

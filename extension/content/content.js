@@ -3,7 +3,7 @@
  *
  * Luồng: bấm nút Dub -> đọc phụ đề tiếng Anh (lib/vtt.js) -> kiểm tra cache
  * (lib/cache.js) -> nếu chưa có, mở Port tới service worker (background.js)
- * chạy job dịch (LLM API) + tổng hợp giọng (TTS server local, server/) ->
+ * chạy job dịch qua Gemini API + tổng hợp giọng (TTS server local, server/) ->
  * nhận về MỘT file audio dài bằng video -> phát bằng thẻ <audio> neo cứng
  * currentTime = video.currentTime. Tua/pause/đổi tốc độ chỉ là một phép gán,
  * luôn đúng ngay lập tức dù tua tới đâu, không cần buffer.
@@ -38,7 +38,8 @@
     serverUrl: "http://127.0.0.1:18765",
     serverApiKey: "",
     voice: "",
-    planVersion: "v1",
+    viSyllablesPerSec: 2.6,
+    planVersion: "kokoro-v11",
   };
 
   // % chiều cao video — theo nghiên cứu ngành (phụ đề chuyên nghiệp ~7-10%
@@ -73,8 +74,32 @@
   }
 
   async function loadSettings() {
-    const stored = await chrome.storage.local.get("settings");
-    settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+    const response = await chrome.runtime.sendMessage({ type: "GET_CONTENT_SETTINGS" });
+    if (!response || !response.ok) {
+      throw new Error((response && response.error) || "Không đọc được cài đặt extension");
+    }
+    settings = { ...DEFAULT_SETTINGS, ...(response.settings || {}) };
+  }
+
+  function saveSettings(patch) {
+    Object.assign(settings, patch);
+    chrome.runtime.sendMessage({ type: "PATCH_CONTENT_SETTINGS", patch })
+      .then((response) => {
+        if (!response || !response.ok) {
+          console.warn("[LDUB] không lưu được cài đặt:", response && response.error);
+        }
+      })
+      .catch((error) => console.warn("[LDUB] không lưu được cài đặt:", error));
+  }
+
+  function cacheKeyParts(videoId, voice = settings.voice) {
+    return {
+      videoId,
+      voice,
+      planVersion: settings.planVersion,
+      translationModel: "gemini-3.1-flash-lite",
+      viSyllablesPerSec: settings.viSyllablesPerSec,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -150,7 +175,13 @@
     if (!v || v === video) return; // chưa có video, hoặc đã gắn overlay cho đúng video này rồi
     video = v;
     console.log("[LDUB] tìm thấy <video>, đang gắn nút Dub...", v);
-    await loadSettings();
+    try {
+      await loadSettings();
+    } catch (error) {
+      console.error("[LDUB] không nạp được cài đặt extension:", error);
+      video = null;
+      return;
+    }
     injectOverlay();
     console.log("[LDUB] đã gắn nút Dub xong.");
   }
@@ -375,7 +406,7 @@
       if (!subtitleDrag) return;
       subtitleDrag = null;
       subtitleEl.classList.remove("ldub-dragging");
-      chrome.storage.local.set({ settings }); // nhớ vị trí cho lần xem sau
+      saveSettings({ subtitleOffsetX: settings.subtitleOffsetX, subtitleOffsetY: settings.subtitleOffsetY });
     };
     subtitleEl.addEventListener("pointerup", endDrag);
     subtitleEl.addEventListener("pointercancel", endDrag);
@@ -383,7 +414,7 @@
       if (!e.target.closest(".ldub-sub-box")) return;
       settings.subtitleOffsetX = 0;
       settings.subtitleOffsetY = 0;
-      chrome.storage.local.set({ settings });
+      saveSettings({ subtitleOffsetX: 0, subtitleOffsetY: 0 });
       positionOverlay();
     });
   }
@@ -413,11 +444,7 @@
 
   async function tryLoadFromCache() {
     try {
-      const rec = await DUB.cache.get({
-        videoId: videoIdFromUrl(),
-        voice: settings.voice,
-        planVersion: settings.planVersion,
-      });
+      const rec = await DUB.cache.get(cacheKeyParts(videoIdFromUrl()));
       if (rec && rec.audioBase64) {
         setBtnLabel("Xem lại bản đã thuyết minh");
       }
@@ -443,11 +470,7 @@
     const videoId = videoIdFromUrl();
     try {
       const cached = await DUB.cache
-        .get({
-          videoId,
-          voice: settings.voice,
-          planVersion: settings.planVersion,
-        })
+        .get(cacheKeyParts(videoId))
         .catch(() => null);
       if (cached && cached.audioBase64) {
         setPanel(80, "Đang tải từ cache...", true);
@@ -478,11 +501,7 @@
           };
           DUB.cache
             .put(
-              {
-                videoId,
-                voice: settings.voice,
-                planVersion: settings.planVersion,
-              },
+              cacheKeyParts(videoId),
               record,
             )
             .catch(() => {});
@@ -718,7 +737,7 @@
     });
     controlsEl.querySelector(".ldub-cc").addEventListener("change", (e) => {
       settings.subtitlesOn = e.target.checked;
-      chrome.storage.local.set({ settings });
+      saveSettings({ subtitlesOn: settings.subtitlesOn });
       updateSubtitle();
     });
     controlsEl
@@ -801,7 +820,7 @@
       sel.value = settings.voice;
     else if (sel.options.length) {
       settings.voice = sel.value;
-      chrome.storage.local.set({ settings });
+      saveSettings({ voice: settings.voice });
     }
     hint.textContent =
       "Đổi giọng sẽ tổng hợp lại (không tốn lượt gọi API dịch).";
@@ -841,7 +860,7 @@
 
   async function onVoiceChange(voice) {
     settings.voice = voice;
-    chrome.storage.local.set({ settings });
+    saveSettings({ voice });
     if (!currentPlan || !currentTranslated) return;
 
     setPanel(5, "Đang đổi giọng...", true);
@@ -861,7 +880,7 @@
           subtitles: msg.subtitles,
         };
         DUB.cache
-          .put({ videoId, voice, planVersion: settings.planVersion }, record)
+          .put(cacheKeyParts(videoId, voice), record)
           .catch(() => {});
         applyResult(record);
       } else if (msg.type === "ERROR") {
