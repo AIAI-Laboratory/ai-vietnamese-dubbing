@@ -53,14 +53,28 @@ function log(...args) { console.log('[dub]', ...args); }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-function outputTokenBudget(rows, floor = 500, ceiling = TRANSLATE_MAX_TOKENS) {
+// Ước lượng token đầu ra. Cả hai công thức cũ đều thiếu phần khung JSON
+// ({"id":..,"vi":".."} tốn khoảng 20-25 token mỗi dòng) nên cấp trần kiểu 571
+// token cho 25 câu — phản hồi bị cắt giữa chừng, parse JSON hỏng, cả pass
+// review lẫn pass rút gọn câu dài đều chết. Trần rộng không tốn thêm gì khi
+// phản hồi ngắn: model dừng khi viết xong.
+const JSON_ROW_OVERHEAD_TOKENS = 25;
+const PROMPT_TAIL_TOKENS = 200;
+
+/** Trần cho bước DỊCH: ước theo hạn mức âm tiết của chính các câu đó. */
+function outputTokenBudget(rows, floor = 600) {
   const syllables = rows.reduce((sum, row) => sum + Number(row.budget && row.budget.max || row.max || 0), 0);
-  return Math.min(ceiling, Math.max(floor, syllables * 2 + 120));
+  // Một âm tiết tiếng Việt thường 1-2 token; lấy 3 cho chắc, đây là trần.
+  const estimate = syllables * 3 + rows.length * JSON_ROW_OVERHEAD_TOKENS + PROMPT_TAIL_TOKENS;
+  return Math.min(TRANSLATE_MAX_TOKENS, Math.max(floor, estimate));
 }
 
-function reviewTokenBudget(rows, floor = 400, ceiling = 1200) {
+/** Trần cho các bước VIẾT LẠI: đầu ra dài xấp xỉ bản dịch đang có. */
+function reviewTokenBudget(rows, floor = 800) {
   const characters = rows.reduce((sum, row) => sum + String(row.vi || row.en || '').length, 0);
-  return Math.min(ceiling, Math.max(floor, Math.ceil(characters / 3) + 160));
+  // Tiếng Việt có dấu ~2 ký tự mỗi token.
+  const estimate = Math.ceil(characters / 2) + rows.length * JSON_ROW_OVERHEAD_TOKENS + PROMPT_TAIL_TOKENS;
+  return Math.min(TRANSLATE_MAX_TOKENS, Math.max(floor, estimate));
 }
 
 function retryDelayMs(response, rawBody, fallbackMs) {
@@ -462,7 +476,7 @@ async function enforceKeptTerms(plan, translated, settings, terminology) {
     settings,
     DUB.plan.buildReviewSystemPrompt(settings.viSyllablesPerSec, terminology),
     DUB.plan.buildGlossaryCompliancePrompt(rows, terms),
-    reviewTokenBudget(rows, 400, 1000),
+    reviewTokenBudget(rows),
   );
   const replacements = new Map(DUB.plan.parseTranslationResponse(raw).map((segment) => [segment.id, segment.vi]));
   return translated.map((segment) => (
@@ -486,7 +500,7 @@ async function compactOverflowTranslations(plan, translated, settings, terminolo
     settings,
     DUB.plan.buildTranslateSystemPrompt(settings.viSyllablesPerSec, terminology),
     DUB.plan.buildCompactUserPrompt(rows),
-    outputTokenBudget(rows, 300, 1600),
+    outputTokenBudget(rows),
   );
   const compacted = DUB.plan.parseTranslationResponse(raw);
   const originalById = new Map(translated.map((segment) => [segment.id, segment.vi]));
@@ -546,6 +560,24 @@ function authHeaders(apiKey) {
   return apiKey ? { 'X-API-Key': apiKey } : {};
 }
 
+/**
+ * fetch tới TTS server kèm thông báo lỗi nói rõ chuyện gì. fetch ném
+ * TypeError trần trụi "Failed to fetch" khi server chưa chạy, mà panel lại
+ * hiện thẳng câu đó cho người dùng — không ai đoán ra là phải bật server.
+ */
+async function fetchServer(url, options, what) {
+  try {
+    return await fetch(url, options);
+  } catch (error) {
+    const detail = error && error.message ? error.message : String(error);
+    throw new Error(
+      `Không kết nối được TTS server khi ${what} (${url}). `
+      + 'Kiểm tra server đã chạy chưa: python server/main.py. '
+      + `Chi tiết: ${detail}`,
+    );
+  }
+}
+
 async function fetchVoices(serverUrl, apiKey, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs || 15000);
@@ -586,11 +618,11 @@ async function previewVoice(serverUrl, apiKey, text, voice, timeoutMs) {
 
 async function saveDebugTranscript(settings, payload) {
   const url = settings.serverUrl.replace(/\/+$/, '') + '/api/debug/transcript';
-  const res = await fetch(url, {
+  const res = await fetchServer(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(settings.serverApiKey) },
     body: JSON.stringify(payload),
-  });
+  }, 'lưu transcript debug');
   if (!res.ok) {
     throw new Error(buildErrorDetail(res.status, await res.text().catch(() => '')));
   }
@@ -601,11 +633,11 @@ async function ttsSynthesize(plan, translated, settings) {
   const byId = new Map(translated.map((r) => [r.id, r.vi]));
   const segments = plan.segments.map((g) => ({ id: g.id, start: g.start, end: g.end, vi: byId.get(g.id) || '' }));
   const url = settings.serverUrl.replace(/\/+$/, '') + '/api/synthesize';
-  const res = await fetch(url, {
+  const res = await fetchServer(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders(settings.serverApiKey) },
     body: JSON.stringify({ voice: settings.voice, durationSec: plan.videoDuration, segments }),
-  });
+  }, 'gửi yêu cầu tổng hợp giọng');
   if (!res.ok) throw new Error('TTS server từ chối yêu cầu: ' + buildErrorDetail(res.status, await res.text().catch(() => '')));
   const data = await res.json();
   if (!data.jobId) throw new Error('TTS server không trả jobId');
@@ -622,7 +654,7 @@ function formatDur(sec) {
 async function ttsPoll(jobId, settings, onProgress) {
   const url = settings.serverUrl.replace(/\/+$/, '') + '/api/job/' + jobId;
   for (;;) {
-    const res = await fetch(url, { headers: authHeaders(settings.serverApiKey) });
+    const res = await fetchServer(url, { headers: authHeaders(settings.serverApiKey) }, 'theo dõi tiến độ job');
     if (!res.ok) throw new Error('Không lấy được trạng thái job TTS: ' + buildErrorDetail(res.status, await res.text().catch(() => '')));
     const data = await res.json();
     if (onProgress) onProgress(data);
@@ -653,7 +685,7 @@ function arrayBufferToBase64(buf) {
 
 async function fetchAudioAsBase64(audioUrl, serverBaseUrl, apiKey) {
   const full = /^https?:\/\//i.test(audioUrl) ? audioUrl : serverBaseUrl.replace(/\/+$/, '') + audioUrl;
-  const res = await fetch(full, { headers: authHeaders(apiKey) });
+  const res = await fetchServer(full, { headers: authHeaders(apiKey) }, 'tải audio về');
   if (!res.ok) throw new Error('Không tải được audio từ TTS server: HTTP ' + res.status);
   const mime = res.headers.get('content-type') || 'audio/opus';
   const buf = await res.arrayBuffer();
