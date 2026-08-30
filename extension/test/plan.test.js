@@ -61,3 +61,27 @@ test('plan cũ trong cache không có usableSlot vẫn chấm được', () => {
   const verified = plan.verifyPlan(legacy, [{ id: 1, vi: 'một hai ba bốn năm sáu' }], 2);
   assert.strictEqual(verified.rows[0].status, 'VƯỢT');
 });
+
+test('tốc độ đọc hội tụ dần về số server đo được', () => {
+  // Baseline 3.8, giọng thật đọc 4.4: mỗi lần chạy kéo lại một phần.
+  let rate = 3.8;
+  const seen = [];
+  for (let i = 0; i < 6; i++) {
+    rate = plan.nextCalibratedRate(rate, 4.4);
+    seen.push(rate);
+  }
+  assert.ok(seen[0] > 3.8 && seen[0] < 4.4, `bước đầu phải nhích dần, nhận ${seen[0]}`);
+  assert.ok(seen.at(-1) > 4.2, `sau 6 lần phải gần 4.4, nhận ${seen.at(-1)}`);
+  // Làm tròn 0.1 vì rate nằm trong khoá cache.
+  for (const r of seen) assert.strictEqual(r, Math.round(r * 10) / 10);
+});
+
+test('bỏ qua số đo vô lý thay vì phá cấu hình', () => {
+  for (const bad of [null, undefined, 0, -1, NaN, 'nhanh', 12, 1.2]) {
+    assert.strictEqual(plan.nextCalibratedRate(3.8, bad), 3.8, `giá trị ${bad} phải bị bỏ qua`);
+  }
+});
+
+test('số đo trùng giá trị hiện tại không tạo thay đổi (không bust cache)', () => {
+  assert.strictEqual(plan.nextCalibratedRate(3.8, 3.8), 3.8);
+});

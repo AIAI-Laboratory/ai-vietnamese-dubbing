@@ -25,7 +25,7 @@ const DEFAULTS = {
   serverApiKey: "",
   voice: "",
 
-  viSyllablesPerSec: 2.6,
+  viSyllablesPerSec: 3.8,
   planVersion: "gemini-v2",
 };
 

@@ -167,8 +167,9 @@
           </div>
           <p class="field-hint">
             Tốc độ đọc tiếng Việt tham chiếu — quyết định câu dịch dài bao nhiêu thì vừa khung hình.
-            Baseline là 2.6 theo benchmark Kokoro CPU; tốc độ thực tế phụ thuộc voice.
-            Số thật của lần chạy gần nhất nằm ở <code>measuredSyllablesPerSec</code> trong log.
+            Baseline là 3.8, đo trên giọng Kokoro mặc định. Sau mỗi lần lồng tiếng,
+            số này tự hiệu chỉnh theo tốc độ đọc thật của giọng đang dùng, nên
+            thường không cần sửa tay.
           </p>
         </div>
       </section>

@@ -23,8 +23,17 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   // một câu mượn khoảng lặng phía sau nó.
   const BORROW_GAP_SEC = 0.08;
   const ROOMY_RATIO = 0.75;
-  // Baseline an toàn; tốc độ thực tế phụ thuộc voice Kokoro và CPU.
-  const DEFAULT_RATE = 2.6;
+  // Đo trên giọng Kokoro mặc định qua 5 job thật: 3.75-3.92 âm tiết/giây.
+  // Baseline 2.6 trước đây thấp hơn thực tế ~46%, khiến hạn mức âm tiết bị
+  // cắt gần một phần ba và bản dịch bị ép súc tích vô cớ.
+  const DEFAULT_RATE = 3.8;
+  // Biên tin được cho tốc độ đo về: ngoài khoảng này gần như chắc chắn là
+  // job hỏng (một câu duy nhất, audio lỗi) chứ không phải giọng đọc thật.
+  const RATE_MIN = 2.0;
+  const RATE_MAX = 6.0;
+  // Trọng số của số đo mới. Thấp để một bài giảng bất thường không kéo lệch
+  // hẳn cấu hình, vẫn đủ để hội tụ sau vài lần chạy.
+  const RATE_ALPHA = 0.3;
 
   const VI_MARKS = /[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i;
 
@@ -387,6 +396,19 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       .map((r) => ({ id: +r.id, vi: r.vi }));
   }
 
+  /**
+   * Tốc độ đọc dùng cho lần sau, từ tốc độ server đo được của job vừa xong.
+   * Làm tròn 0.1 vì rate nằm trong khoá cache: nhích vài phần nghìn mỗi lần
+   * chạy sẽ khiến mọi bài đã lồng tiếng phải làm lại từ đầu.
+   */
+  function nextCalibratedRate(current, measured) {
+    const now = Number(current) || DEFAULT_RATE;
+    const seen = Number(measured);
+    if (!Number.isFinite(seen) || seen < RATE_MIN || seen > RATE_MAX) return now;
+    const blended = now * (1 - RATE_ALPHA) + seen * RATE_ALPHA;
+    return Math.round(Math.min(RATE_MAX, Math.max(RATE_MIN, blended)) * 10) / 10;
+  }
+
   function verifyPlan(plan, translated, rate) {
     rate = rate || plan.calibration.viSyllablesPerSec || DEFAULT_RATE;
     const byId = new Map(translated.map((r) => [r.id, r.vi]));
@@ -409,7 +431,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
   DUB.plan = {
     STRETCH_MIN, STRETCH_MAX, DEFAULT_RATE,
-    countViSyllables, cuesToSentences, buildPlan, chunkSegments,
+    countViSyllables, cuesToSentences, buildPlan, chunkSegments, nextCalibratedRate,
     buildTerminologySystemPrompt, buildTerminologyUserPrompt, buildTerminologyRetryUserPrompt,
     parseTerminologyResponse,
     buildTerminologyReviewSystemPrompt, buildTerminologyReviewUserPrompt,

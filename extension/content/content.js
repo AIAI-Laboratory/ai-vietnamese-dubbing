@@ -40,7 +40,7 @@
     serverUrl: "http://127.0.0.1:18765",
     serverApiKey: "",
     voice: "",
-    viSyllablesPerSec: 2.6,
+    viSyllablesPerSec: 3.8,
     planVersion: "kokoro-v11",
   };
 

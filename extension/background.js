@@ -25,8 +25,9 @@ const DEFAULT_SETTINGS = {
   serverApiKey: '',
   voice: '',
 
-  // Baseline ban đầu; server trả tốc độ đo thật sau mỗi job để hiệu chỉnh.
-  viSyllablesPerSec: 2.6,
+  // Baseline ban đầu của giọng Kokoro mặc định; sau mỗi job, tốc độ server
+  // đo được sẽ kéo giá trị này về đúng giọng đang dùng (xem calibrateRate).
+  viSyllablesPerSec: 3.8,
 
   planVersion: 'gemini-v2',
 };
@@ -701,7 +702,27 @@ async function runJob(msg, port) {
     audioBase64: base64, audioMime: mime,
     measuredSyllablesPerSec: done.measuredSyllablesPerSec || null,
   });
+  await calibrateRate(settings, done.measuredSyllablesPerSec);
   log(`job xong toàn bộ sau ${((Date.now() - tJob) / 1000).toFixed(1)}s`);
+}
+
+/**
+ * Kéo viSyllablesPerSec về tốc độ đọc thật mà server vừa đo. Không có bước
+ * này thì baseline đứng yên mãi: hạn mức âm tiết sai, bản dịch bị ép ngắn
+ * hơn mức audio chứa được, và verifyPlan báo "vượt" cho những câu vốn vừa.
+ */
+async function calibrateRate(settings, measured) {
+  const next = DUB.plan.nextCalibratedRate(settings.viSyllablesPerSec, measured);
+  if (next === settings.viSyllablesPerSec) return;
+  try {
+    const stored = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({
+      settings: { ...(stored.settings || {}), viSyllablesPerSec: next },
+    });
+    log(`hiệu chỉnh tốc độ đọc: ${settings.viSyllablesPerSec} -> ${next} âm tiết/giây (đo được ${measured})`);
+  } catch (error) {
+    console.warn('[dub] không lưu được tốc độ đọc đã hiệu chỉnh:', error);
+  }
 }
 
 /** Chạy lại chỉ bước tổng hợp giọng, dùng bản dịch đã có (đổi giọng, không tốn lượt gọi LLM). */
