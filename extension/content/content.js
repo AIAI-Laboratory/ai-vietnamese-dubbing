@@ -1,7 +1,9 @@
 /**
- * Content script — chạy trên trang bài giảng Coursera.
+ * Content script — chạy trên trang video được lib/sites.js hỗ trợ (Coursera,
+ * YouTube). Mọi chi tiết riêng của từng trang nằm trong adapter đó, file này
+ * chỉ dùng interface chung.
  *
- * Luồng: bấm nút Dub -> đọc phụ đề tiếng Anh (lib/vtt.js) -> kiểm tra cache
+ * Luồng: bấm nút Dub -> đọc phụ đề tiếng Anh (adapter) -> kiểm tra cache
  * (lib/cache.js) -> nếu chưa có, mở Port tới service worker (background.js)
  * chạy job dịch qua Gemini API + tổng hợp giọng (TTS server local, server/) ->
  * nhận về MỘT file audio dài bằng video -> phát bằng thẻ <audio> neo cứng
@@ -67,10 +69,11 @@
   let voicesCache = null;
   const previewAudioCache = new Map(); // voice -> {base64, mime} — nghe lại không tổng hợp lại
 
+  // Adapter của trang đang mở; null nghĩa là extension không chạy ở đây.
+  const site = DUB.sites.current();
+
   function videoIdFromUrl() {
-    // .../learn/<course-slug>/lecture/<itemId>/<item-slug>
-    const m = location.pathname.match(/\/learn\/([^/]+)\/lecture\/([^/]+)/);
-    return m ? `${m[1]}::${m[2]}` : location.pathname;
+    return site ? `${site.id}::${site.videoId()}` : location.pathname;
   }
 
   async function loadSettings() {
@@ -103,8 +106,8 @@
   }
 
   // -------------------------------------------------------------------------
-  // Tìm video + theo dõi điều hướng SPA (Coursera không phát sự kiện điều
-  // hướng công khai nên poll pathname nhẹ nhàng mỗi giây).
+  // Tìm video + theo dõi điều hướng SPA (Coursera lẫn YouTube không phát sự
+  // kiện điều hướng công khai nên poll URL nhẹ nhàng mỗi giây).
   // -------------------------------------------------------------------------
 
   function findVideo() {
@@ -159,11 +162,13 @@
   let lastPath = "";
   function watchNavigation() {
     setInterval(() => {
-      // Coursera là SPA — <video> có thể render SAU thời điểm content script
+      // Trang là SPA — <video> có thể render SAU thời điểm content script
       // chạy (document_idle), nên phải thử lại đều đặn, không chỉ khi URL
       // đổi. Đổi URL thì dọn dẹp overlay/audio cũ trước khi thử lại.
-      if (location.pathname !== lastPath) {
-        lastPath = location.pathname;
+      // YouTube giữ nguyên /watch khi đổi video, chỉ ?v= đổi — so cả query.
+      const here = location.pathname + location.search;
+      if (here !== lastPath) {
+        lastPath = here;
         teardown();
       }
       init();
@@ -234,22 +239,22 @@
   // (React) tự vẽ lại (timestamp nhảy mỗi giây), có thể TỰ XOÁ node của mình
   // ở lần vẽ lại kế tiếp vì nó không nằm trong cây mà framework quản lý.
   //
-  // Neo bằng aria-label ("Video playback rate switcher") thay vì tên class —
-  // class do build tool sinh ra (kiểu "css-179heut") đổi mỗi lần Coursera
-  // deploy lại, còn aria-label ổn định hơn nhiều vì nó phục vụ accessibility,
-  // không đổi theo tốc độ hiện tại (khác với chữ hiển thị "1x"/"2x"...).
+  // Selector neo do adapter của từng trang cung cấp (lib/sites.js) — ưu tiên
+  // aria-label/class ổn định thay vì tên class do build tool sinh ra, thứ đổi
+  // sau mỗi lần trang deploy lại.
   //
   // Thất bại (không tìm thấy, hoặc bị xoá liên tục) thì tự rơi về vị trí nổi
   // sẵn có (đã kiểm chứng hoạt động) — không bao giờ để mất nút hẳn.
   // -------------------------------------------------------------------------
 
-  const SPEED_BTN_SELECTOR =
-    'button[aria-label="Video playback rate switcher"]';
-  const SPEED_BTN_TEXT_RE = /^\d+(\.\d+)?x$/i; // dự phòng nếu Coursera đổi aria-label
+  const SPEED_BTN_TEXT_RE = /^\d+(\.\d+)?x$/i; // dự phòng nếu trang đổi aria-label
 
   function findSpeedControlNear(v) {
-    let btn = document.querySelector(SPEED_BTN_SELECTOR);
-    if (btn) return btn;
+    let btn = null;
+    for (const selector of (site && site.dockSelectors) || []) {
+      btn = document.querySelector(selector);
+      if (btn) return btn;
+    }
     const vr = v.getBoundingClientRect();
     for (const el of document.querySelectorAll('button, [role="button"]')) {
       const text = (el.textContent || "").trim();
@@ -292,7 +297,7 @@
       dockObserver.observe(row, { childList: true });
     } catch (e) {
       console.warn(
-        "[LDUB] không gắn được vào thanh điều khiển Coursera, giữ vị trí nổi.",
+        "[LDUB] không gắn được vào thanh điều khiển của trang, giữ vị trí nổi.",
         e,
       );
     }
@@ -302,7 +307,7 @@
     // Thanh điều khiển có thể chưa render xong lúc nút Dub được gắn
     // (document_idle chạy sớm hơn React thuỷ hợp). Thử lại vài lần trong vài
     // giây đầu rồi bỏ cuộc, giữ vị trí nổi — không thử vô hạn, tránh tốn CPU
-    // nếu Coursera đổi hẳn cấu trúc UI khác.
+    // nếu trang đổi hẳn cấu trúc UI khác.
     clearTimeout(dockRetryTimer);
     let attempts = 0;
     const tick = () => {
@@ -478,7 +483,7 @@
         return;
       }
 
-      const cues = await DUB.vtt.getEnglishCues(video);
+      const cues = await site.getCues(video);
       if (!cues || !cues.length) {
         setPanel(
           0,

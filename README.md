@@ -1,7 +1,7 @@
 # Local AI Vietnamese Dubbing
 
-A Chrome extension that dubs Coursera lecture videos into Vietnamese,
-in sync with the video timeline.
+A Chrome extension that dubs Coursera lectures and YouTube videos into
+Vietnamese, in sync with the video timeline.
 
 It reads the video's existing English captions, translates them with the
 official Gemini API, synthesizes speech locally with Kokoro-Vietnamese ONNX, and plays
@@ -15,8 +15,8 @@ provider. Video and audio never leave your machine.
 ## How it works
 
 ```
-Coursera <track> (VTT captions)
-        |  fetched directly by the content script
+English captions (Coursera <track>, YouTube timedtext)
+        |  fetched by the site adapter in extension/lib/sites.js
         v
 Group captions into sentences, budget syllables per sentence
         |
@@ -83,13 +83,21 @@ and click **Load voices**.
 
 ### 4. Use it
 
-Open a Coursera lecture, make sure captions (CC) are on, and click the mic
-button next to the video controls.
+Open a Coursera lecture or a YouTube video that has English captions, turn
+captions (CC) on, and click the mic button next to the video controls.
+
+Support for another site is one adapter in `extension/lib/sites.js` plus a
+matching entry in `extension/manifest.json`.
 
 ## Verification
 
-- JavaScript syntax, Python compilation, server unit tests, and dependency
-  integrity are checked locally before release.
+- JavaScript syntax, Python compilation, and the unit tests are checked
+  locally before release:
+
+  ```bash
+  node --test extension/test/
+  cd server && python -m unittest discover -p "test_*.py"
+  ```
 - Kokoro model loading and CPU synthesis can be smoke-tested with the
   Swagger preview route at `POST /api/preview`.
 
