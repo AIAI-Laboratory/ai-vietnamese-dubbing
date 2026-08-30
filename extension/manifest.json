@@ -2,10 +2,15 @@
   "manifest_version": 3,
   "name": "Local AI Vietnamese Dubbing",
   "version": "0.1.0",
-  "description": "Thuyết minh tiếng Việt tự động cho video Coursera. Dịch qua Gemini API chính thức, tổng hợp giọng nói qua server local trên máy bạn.",
-  "permissions": ["storage", "activeTab", "scripting"],
+  "description": "Thuyết minh tiếng Việt tự động cho video Coursera và YouTube. Dịch qua Gemini API chính thức, tổng hợp giọng nói qua server local trên máy bạn.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
   "host_permissions": [
     "https://www.coursera.org/*",
+    "https://www.youtube.com/*",
     "https://generativelanguage.googleapis.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
@@ -15,13 +20,19 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.coursera.org/learn/*"],
+      "matches": [
+        "https://www.coursera.org/learn/*",
+        "https://www.youtube.com/watch*"
+      ],
       "js": [
         "lib/vtt.js",
+        "lib/sites.js",
         "lib/cache.js",
         "content/content.js"
       ],
-      "css": ["content/content.css"],
+      "css": [
+        "content/content.css"
+      ],
       "run_at": "document_idle"
     }
   ],

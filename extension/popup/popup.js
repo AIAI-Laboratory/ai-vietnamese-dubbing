@@ -77,14 +77,19 @@ $('btnResetSubPos').addEventListener('click', async () => {
   await saveFields({ subtitleOffsetX: 0, subtitleOffsetY: 0 });
   const btn = $('btnResetSubPos');
   const original = btn.textContent;
-  btn.textContent = 'Đã đặt lại — tải lại tab Coursera để thấy';
+  btn.textContent = 'Đã đặt lại — tải lại tab video để thấy';
   setTimeout(() => { btn.textContent = original; }, 2500);
 });
 
+// Cache nằm trong IndexedDB của chính trang video, nên phải xoá qua một tab
+// đang mở của trang đó — mỗi trang hỗ trợ là một origin riêng.
+const SUPPORTED_TAB_URLS = ['https://www.coursera.org/*', 'https://www.youtube.com/*'];
+const SUPPORTED_PAGE_RE = /^https:\/\/(www\.coursera\.org\/learn\/|www\.youtube\.com\/watch)/;
+
 async function onClearCache() {
   const status = $('cacheStatus');
-  const tabs = await chrome.tabs.query({ url: 'https://www.coursera.org/*' });
-  if (!tabs.length) { setStatus(status, 'Mở một tab Coursera rồi thử lại (cache lưu theo trang).', false); return; }
+  const tabs = await chrome.tabs.query({ url: SUPPORTED_TAB_URLS });
+  if (!tabs.length) { setStatus(status, 'Mở một tab Coursera hoặc YouTube rồi thử lại (cache lưu theo trang).', false); return; }
   let cleared = 0;
   for (const tab of tabs) {
     try {
@@ -100,7 +105,7 @@ async function onClearCache() {
       cleared++;
     } catch (e) { /* tab có thể không cho inject (chrome://, extension page...) — bỏ qua */ }
   }
-  setStatus(status, `Đã xoá cache trên ${cleared}/${tabs.length} tab Coursera đang mở.`, cleared > 0);
+  setStatus(status, `Đã xoá cache trên ${cleared}/${tabs.length} tab đang mở.`, cleared > 0);
 }
 $('btnClearCache').addEventListener('click', onClearCache);
 
@@ -122,13 +127,13 @@ async function main() {
   if (!s.geminiApiKey) missing.push('Gemini API key');
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const onCoursera = tab && /^https:\/\/www\.coursera\.org\/learn\//.test(tab.url || '');
+  const onSupportedPage = tab && SUPPORTED_PAGE_RE.test(tab.url || '');
 
   if (missing.length) {
     statusEl.textContent = 'Chưa cấu hình: ' + missing.join(', ') + '. Mở Cài đặt để thiết lập.';
     statusEl.className = 'status err';
-  } else if (!onCoursera) {
-    statusEl.textContent = 'Đã cấu hình. Mở một bài giảng Coursera để dùng.';
+  } else if (!onSupportedPage) {
+    statusEl.textContent = 'Đã cấu hình. Mở một bài giảng Coursera hoặc video YouTube để dùng.';
     statusEl.className = 'status ok';
   } else {
     statusEl.textContent = 'Sẵn sàng — bấm nút Thuyết minh tiếng Việt nổi trên video.';
