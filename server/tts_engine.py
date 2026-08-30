@@ -1,152 +1,206 @@
-"""
-Engine tổng hợp giọng nói — GttsEngine, gọi endpoint TTS không chính thức
-của Google Translate (qua package `gTTS`). CẢNH BÁO: endpoint KHÔNG CHÍNH
-THỨC — có thể ngừng hoạt động hoặc bị giới hạn tốc độ bất cứ lúc nào không
-báo trước, và việc gọi tự động hoá có thể vi phạm Điều khoản dịch vụ Google
-Translate. Xem server/README.md mục "gTTS" để biết rủi ro đầy đủ trước khi
-dùng lâu dài.
-
-Không có engine giả (mock) — lỗi nạp thì báo lỗi thật qua /api/health
-("status":"error"), không âm thầm chạy chế độ giả.
-"""
+"""Kokoro-Vietnamese ONNX engine chạy hoàn toàn trên CPU."""
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import re
-import subprocess
-import tempfile
-import time
+import threading
 import unicodedata
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger("tts_engine")
 
-VI_MARKS = re.compile(
+SAMPLE_RATE = 24000
+MODEL_REVISION = "9f210d622209fcc216fe2ac6159fed2ff381cb8a"
+
+# vig2p đọc acronym tiếng Anh không ổn định. Chuẩn hoá những thuật ngữ xuất
+# hiện thường xuyên trong bài giảng lập trình, còn phụ đề vẫn giữ nguyên.
+_SPOKEN_TERMS = {
+    "HTTPS": "hát ti ti pi ét",
+    "HTTP": "hát ti ti pi",
+    "HTML": "hát ti em eo",
+    "JSON": "giây son",
+    "SQL": "ét kiu eo",
+    "URL": "iu a eo",
+    "CPU": "xi pi iu",
+    "GPU": "gi pi iu",
+    "API": "ây pi ai",
+    "CSS": "xi ét ét",
+    "UI": "iu ai",
+    "AI": "ây ai",
+}
+_SPOKEN_TERM_RE = re.compile(
+    r"\b(" + "|".join(map(re.escape, _SPOKEN_TERMS)) + r")\b",
+    re.IGNORECASE,
+)
+_VI_MARKS = re.compile(
     "[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩị"
     "òóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]",
     re.IGNORECASE,
 )
 
 
+def normalize_for_speech(text: str) -> str:
+    """Đổi acronym kỹ thuật phổ biến sang cách đọc tiếng Việt."""
+
+    normalized = unicodedata.normalize("NFC", text).strip()
+    return _SPOKEN_TERM_RE.sub(
+        lambda match: _SPOKEN_TERMS[match.group(0).upper()], normalized
+    )
+
+
 def count_vi_syllables(text: str) -> int:
-    """Khớp countViSyllables trong extension/lib/plan.js — cùng logic ở
-    nhiều ngôn ngữ để hạn mức tính lúc PLAN và lúc TTS thật đồng nhất."""
-    n = 0
-    for tok in text.split():
-        w = "".join(c for c in tok if unicodedata.category(c)[0] in ("L", "N"))
-        if not w:
-            continue
-        is_english = not VI_MARKS.search(w) and re.fullmatch(r"[a-zA-Z]+", w) and len(w) > 4
-        n += -(-len(w) // 3) if is_english else 1
-    return max(n, 1)
+    """Ước lượng số âm tiết của đúng chuỗi sẽ được đưa vào TTS."""
 
-
-class SynthResult:
-    __slots__ = ("wav_path", "duration_sec")
-
-    def __init__(self, wav_path: Path, duration_sec: float):
-        self.wav_path = wav_path
-        self.duration_sec = duration_sec
-
-
-def _wav_duration(path: Path) -> float:
-    with wave.open(str(path), "rb") as f:
-        return f.getnframes() / float(f.getframerate())
-
-
-GTTS_SAMPLE_RATE = 24000
-GTTS_MAX_ATTEMPTS = 3
-GTTS_TIMEOUT_SEC = 15
-
-
-def _mp3_bytes_to_wav(mp3_bytes: bytes, out_path: Path, sample_rate: int) -> None:
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-        tmp.write(mp3_bytes)
-        tmp_path = tmp.name
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_path,
-             "-ar", str(sample_rate), "-ac", "1", str(out_path)],
-            capture_output=True, text=True,
+    count = 0
+    for token in normalize_for_speech(text).split():
+        word = "".join(
+            char for char in token if unicodedata.category(char)[0] in ("L", "N")
         )
-        if proc.returncode != 0:
-            raise RuntimeError("ffmpeg giải mã MP3 lỗi: " + proc.stderr.strip()[:500])
-    finally:
-        os.unlink(tmp_path)
+        if not word:
+            continue
+        is_english = (
+            not _VI_MARKS.search(word)
+            and re.fullmatch(r"[a-zA-Z]+", word)
+            and len(word) > 4
+        )
+        count += -(-len(word) // 3) if is_english else 1
+    return max(count, 1)
 
 
-_session_patched = False
+@dataclass(frozen=True, slots=True)
+class SynthResult:
+    wav_path: Path
+    duration_sec: float
 
 
-def _patch_requests_session_reuse() -> None:
-    """gTTS.stream() tự mở `with requests.Session() as s:` MỚI mỗi câu — đo
-    thật: 2.20s/câu (session mới mỗi lần) so với 1.44s/câu (dùng chung) —
-    nhanh hơn 1.53x chỉ nhờ tái dùng kết nối. Vá 1 lần ở cấp module."""
-    global _session_patched
-    if _session_patched:
-        return
-    import requests
+class KokoroOnnxEngine:
+    """Một ONNX session dùng chung, voicepack được cache và đổi dưới lock."""
 
-    shared = requests.Session()
-    real_session_cls = requests.Session
+    name = "Kokoro-Vietnamese ONNX (CPU, local)"
+    sample_rate = SAMPLE_RATE
 
-    class _ReusedSession(real_session_cls):
-        def __new__(cls, *a, **k):
-            return shared
+    def __init__(self) -> None:
+        import numpy as np
+        import torch
+        from huggingface_hub import hf_hub_download
+        from kokoro_vietnamese import (
+            DEFAULT_CONFIG_FILE,
+            DEFAULT_HF_REPO_ID,
+            DEFAULT_ONNX_FILE,
+            DEFAULT_VOICE,
+            VOICES,
+        )
+        from kokoro_vietnamese.onnx_cli import KokoroVietnameseONNX
 
-        def close(self):
-            pass
+        self._np = np
+        self._torch = torch
+        self._hf_hub_download = hf_hub_download
+        self._repo_id = DEFAULT_HF_REPO_ID
+        self._voices = VOICES
+        self._default_voice = os.environ.get("KOKORO_VOICE", DEFAULT_VOICE).strip()
+        if self._default_voice not in self._voices:
+            available = ", ".join(sorted(self._voices))
+            raise ValueError(
+                f"KOKORO_VOICE={self._default_voice!r} không hợp lệ. Có: {available}"
+            )
 
-        def __exit__(self, *a):
-            pass
+        self._lock = threading.Lock()
+        model_path = hf_hub_download(
+            repo_id=self._repo_id,
+            filename=DEFAULT_ONNX_FILE,
+            revision=MODEL_REVISION,
+        )
+        config_path = hf_hub_download(
+            repo_id=self._repo_id,
+            filename=DEFAULT_CONFIG_FILE,
+            revision=MODEL_REVISION,
+        )
+        voicepack_path = hf_hub_download(
+            repo_id=self._repo_id,
+            filename=self._voices[self._default_voice]["filename"],
+            revision=MODEL_REVISION,
+        )
+        self._runtime = KokoroVietnameseONNX(
+            device="cpu",
+            voice=self._default_voice,
+            onnx_path=model_path,
+            config_path=config_path,
+            voicepack_path=voicepack_path,
+        )
+        self._voicepacks = {self._default_voice: self._runtime.voicepack}
 
-    requests.Session = _ReusedSession
-    _session_patched = True
-    logger.info("gTTS: bật tái dùng kết nối HTTP — đo được nhanh hơn ~1.5x.")
+        # Warm-up một lần để request đầu tiên không chịu chi phí tối ưu graph.
+        audio, _ = self._runtime.synthesize("Xin chào.", crossfade_ms=0)
+        if len(audio) == 0:
+            raise RuntimeError("Kokoro warm-up không tạo được audio")
+        logger.info(
+            "Kokoro sẵn sàng: voice=%s | providers=%s",
+            self._default_voice,
+            self._runtime.session.get_providers(),
+        )
 
+    def list_voices(self) -> list[dict[str, str]]:
+        """Trả danh sách voice theo hợp đồng API hiện tại."""
 
-class GttsEngine:
-    is_mock = False
-    name = "Google Translate TTS (gTTS, không chính thức)"
-    sample_rate = GTTS_SAMPLE_RATE
+        return [
+            {"name": name, "label": info["label"]}
+            for name, info in sorted(self._voices.items())
+        ]
 
-    def __init__(self):
-        from gtts import gTTS
+    def _resolve_voice(self, voice: str) -> str:
+        # "vi" là giá trị gTTS cũ có thể còn trong chrome.storage.
+        name = (
+            voice.strip()
+            if voice and voice.strip() != "vi"
+            else self._default_voice
+        )
+        if name not in self._voices:
+            raise ValueError(f"Không có voice Kokoro {name!r}")
+        return name
 
-        self._gTTS = gTTS
-        _patch_requests_session_reuse()
-        buf_path = Path(tempfile.gettempdir()) / "gtts_selftest.mp3"
-        try:
-            self._gTTS(text="Xin chào", lang="vi", timeout=GTTS_TIMEOUT_SEC).save(str(buf_path))
-        finally:
-            buf_path.unlink(missing_ok=True)
-
-    def list_voices(self) -> list[dict]:
-        return [{"name": "vi", "label": "Google (giọng máy, qua mạng — không chọn được nam/nữ)"}]
+    def _load_voicepack(self, voice: str):
+        cached = self._voicepacks.get(voice)
+        if cached is not None:
+            return cached
+        path = self._hf_hub_download(
+            repo_id=self._repo_id,
+            filename=self._voices[voice]["filename"],
+            revision=MODEL_REVISION,
+        )
+        voicepack = self._torch.load(path, map_location="cpu", weights_only=True)
+        self._voicepacks[voice] = voicepack
+        return voicepack
 
     def synth(self, text: str, out_path: Path, voice: str = "") -> SynthResult:
-        last_err = None
-        for attempt in range(1, GTTS_MAX_ATTEMPTS + 1):
-            try:
-                buf = io.BytesIO()
-                self._gTTS(text=text, lang="vi", timeout=GTTS_TIMEOUT_SEC).write_to_fp(buf)
-                _mp3_bytes_to_wav(buf.getvalue(), out_path, self.sample_rate)
-                return SynthResult(out_path, _wav_duration(out_path))
-            except Exception as e:
-                last_err = e
-                if attempt < GTTS_MAX_ATTEMPTS:
-                    logger.warning("gTTS lỗi (lần %d/%d): %s — thử lại", attempt, GTTS_MAX_ATTEMPTS, e)
-                    time.sleep(1.5 * attempt)
-        raise RuntimeError(f"gTTS lỗi sau {GTTS_MAX_ATTEMPTS} lần thử: {last_err}")
+        """Tổng hợp một segment thành WAV mono PCM 16-bit."""
+
+        spoken_text = normalize_for_speech(text)
+        if not spoken_text:
+            raise ValueError("Văn bản TTS không được để trống")
+
+        voice_name = self._resolve_voice(voice)
+        with self._lock:
+            self._runtime.voicepack = self._load_voicepack(voice_name)
+            audio, _ = self._runtime.synthesize(spoken_text)
+
+        audio = self._np.asarray(audio, dtype=self._np.float32).reshape(-1)
+        if len(audio) == 0 or not self._np.isfinite(audio).all():
+            raise RuntimeError("Kokoro trả về audio rỗng hoặc không hợp lệ")
+
+        pcm = (self._np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+        with wave.open(str(out_path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(self.sample_rate)
+            wav.writeframes(pcm)
+        return SynthResult(out_path, len(audio) / self.sample_rate)
 
 
-def load_engine() -> GttsEngine:
-    """Nạp GttsEngine — lỗi (mất mạng, endpoint chặn...) thì ném lỗi thật ra
-    ngoài, không có engine giả để rơi xuống. Người gọi (main.py
-    load_engine_background) bắt exception, đặt ENGINE_ERROR — /api/health
-    báo lỗi rõ ràng thay vì âm thầm chạy giả."""
-    return GttsEngine()
+def load_engine() -> KokoroOnnxEngine:
+    """Nạp model ONNX và warm-up trước khi server báo sẵn sàng."""
+
+    return KokoroOnnxEngine()
