@@ -16,7 +16,12 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
 (function () {
   const STRETCH_MIN = 0.90;
-  const STRETCH_MAX = 1.10;
+  // Khớp tts_engine.SPEED_MAX bên server: câu vượt khe được đọc lại bằng
+  // tốc độ native của Kokoro tối đa 1.15x trước khi phải cắt bớt.
+  const STRETCH_MAX = 1.15;
+  // Khớp audio_pipeline.BORROW_GAP_SEC: khoảng thở chừa trước câu kế khi
+  // một câu mượn khoảng lặng phía sau nó.
+  const BORROW_GAP_SEC = 0.08;
   const ROOMY_RATIO = 0.75;
   // Baseline an toàn; tốc độ thực tế phụ thuộc voice Kokoro và CPU.
   const DEFAULT_RATE = 2.6;
@@ -104,13 +109,19 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     const sentences = cuesToSentences(cues);
     const segments = sentences.map((s, i) => {
       const slot = +(s.end - s.start).toFixed(3);
-      const max = Math.max(1, Math.floor(slot * rate * stretchMax));
+      // Server cho câu mượn khoảng lặng tới sát câu kế, nên hạn mức trên
+      // tính theo khe thật đó — nếu vẫn tính theo [start,end] thì bản dịch
+      // bị ép ngắn hơn mức audio thực sự chứa được.
+      const nextStart = i + 1 < sentences.length ? sentences[i + 1].start : duration;
+      const usable = Math.max(slot, nextStart - BORROW_GAP_SEC - s.start);
+      const max = Math.max(1, Math.floor(usable * rate * stretchMax));
       const target = Math.round(slot * rate);
       return {
         id: i + 1,
         start: +s.start.toFixed(3),
         end: +s.end.toFixed(3),
         slot,
+        usableSlot: +usable.toFixed(3),
         anchorExact: s.anchorExact,
         en: s.text,
         enWords: countEnWords(s.text),
@@ -384,7 +395,9 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       if (vi === undefined) return { id: g.id, start: g.start, slot: g.slot, vi: null, status: 'THIẾU' };
       const syl = countViSyllables(vi);
       const need = syl / rate;
-      const ratio = g.slot > 0 ? need / g.slot : 99;
+      // usableSlot vắng mặt ở plan dựng bởi bản cũ còn trong cache.
+      const usable = g.usableSlot || g.slot;
+      const ratio = usable > 0 ? need / usable : 99;
       let status = 'ok';
       if (ratio > STRETCH_MAX) status = 'VƯỢT';
       else if (ratio > 1) status = 'nén nhẹ';
