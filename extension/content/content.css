@@ -63,7 +63,9 @@
 .ldub-btn.ldub-btn-docked:hover { box-shadow: none; }
 .ldub-btn:active { transform: scale(.96); }
 .ldub-icon { width: 16px; height: 16px; flex-shrink: 0; }
-.ldub-btn-docked .ldub-icon { width: 14px; height: 14px; }
+/* Icon trong thanh điều khiển phải cân với icon gốc của trình phát (bánh
+   răng, toàn màn hình...) — 14px trông nhỏ hẳn so với hàng. */
+.ldub-btn-docked .ldub-icon { width: 20px; height: 20px; }
 .ldub-btn-text {
   position: absolute;
   width: 1px; height: 1px;
