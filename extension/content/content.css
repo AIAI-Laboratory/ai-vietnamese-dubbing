@@ -87,6 +87,22 @@
   background: #2ed573;
   box-shadow: 0 0 6px #2ed573, 0 0 0 2px var(--ldub-bg);
 }
+/* Trong thanh điều khiển, trạng thái "đang thuyết minh" KHÔNG được vẽ nền:
+   mọi nút gốc của trình phát đều trong suốt, thêm một hộp đen vào giữa hàng
+   trông như lỗi hiển thị. Quy tắc này phải nằm SAU .ldub-btn-active vì hai
+   bên cùng độ ưu tiên — cái sau thắng. Dấu hiệu đang bật chuyển thành chấm
+   xanh nhỏ nằm gọn trong nút, giống cách trình phát tự đánh dấu nút bật. */
+.ldub-btn.ldub-btn-docked.ldub-btn-active {
+  background: none;
+  box-shadow: none;
+}
+.ldub-btn.ldub-btn-docked.ldub-btn-active::after {
+  top: 7px; right: 7px;
+  width: 7px; height: 7px;
+  box-shadow: 0 0 5px #2ed573;
+}
+/* Nút gốc của trình phát không phóng to khi rê chuột; nút mình cũng đừng. */
+.ldub-btn.ldub-btn-docked:hover { transform: none; }
 
 .ldub-panel, .ldub-controls {
   background: var(--ldub-bg);
