@@ -208,9 +208,46 @@
   // Khởi tạo bằng URL hiện tại: để rỗng thì tick đầu tiên tưởng là vừa đổi
   // trang và dọn sạch overlay vừa gắn xong.
   let lastPath = location.pathname + location.search;
+  let navTimer = null;
+  let orphaned = false;
+
+  /**
+   * Reload extension trong lúc trang đang mở sẽ để lại content script này
+   * "mồ côi": chrome.runtime của nó không còn dùng được nữa. Không nhận ra
+   * thì vòng lặp dưới đây gọi sendMessage mỗi giây và ném "Extension context
+   * invalidated" mãi mãi.
+   */
+  function contextGone() {
+    try {
+      return !chrome.runtime || !chrome.runtime.id;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function shutdownOrphan() {
+    if (orphaned) return;
+    orphaned = true;
+    if (navTimer) clearInterval(navTimer);
+    navTimer = null;
+    stopDucking();
+    if (syncTimer) clearInterval(syncTimer);
+    if (syncAbort) syncAbort.abort();
+    pauseAllWindows();
+    if (video) resetVideoVolume();
+    warn("extension vừa được tải lại — bản cũ trong trang này dừng lại, F5 để dùng tiếp");
+    if (overlay) {
+      setPanel(0, "Extension vừa được tải lại. Nhấn F5 để dùng tiếp.", true);
+    }
+  }
+
   function watchNavigation() {
     refreshSite();
-    setInterval(() => {
+    navTimer = setInterval(() => {
+      if (contextGone()) {
+        shutdownOrphan();
+        return;
+      }
       // Trang là SPA — <video> có thể render SAU thời điểm content script
       // chạy (document_idle), nên phải thử lại đều đặn, không chỉ khi URL
       // đổi. Đổi URL thì dọn dẹp overlay/audio cũ trước khi thử lại.
@@ -234,8 +271,12 @@
     try {
       await loadSettings();
     } catch (error) {
-      console.error("[LDUB] không nạp được cài đặt extension:", error);
       video = null;
+      if (contextGone()) {
+        shutdownOrphan();
+        return;
+      }
+      console.error("[LDUB] không nạp được cài đặt extension:", error);
       return;
     }
     injectOverlay();
