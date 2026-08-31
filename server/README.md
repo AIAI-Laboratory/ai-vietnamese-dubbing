@@ -94,7 +94,13 @@ rendered as placeholder speech.
 ```bash
 python -m compileall -q .
 python -m pip check
+python -m unittest discover -s ../tests -t ../tests
 ```
+
+Swagger UI (`/docs`, `/redoc`, `/openapi.json`) is off by default: those routes
+are plain Starlette routes, so the global API-key dependency does not cover
+them and anyone reaching the port could read the API surface. Set
+`ENABLE_DOCS=1` when the server is on loopback and you want to poke at it.
 
 Use `POST /api/preview` in Swagger to verify model loading and listen to each
 voice on the target machine.

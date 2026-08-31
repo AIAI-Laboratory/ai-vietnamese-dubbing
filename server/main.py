@@ -81,6 +81,10 @@ MAX_PENDING_JOBS = max(1, int(os.environ.get("MAX_PENDING_JOBS", "4")))
 # Một job cho bài giảng dài có vài nghìn segment; chặn body lớn hơn để không
 # ai đẩy được payload khổng lồ vào server.
 MAX_BODY_BYTES = max(1, int(os.environ.get("MAX_BODY_MB", "16"))) * 1024 * 1024
+# Swagger UI và openapi.json KHÔNG khoá được bằng dependency của FastAPI (chúng
+# là route Starlette thuần, dependencies chỉ áp cho APIRoute), nên mặc định tắt
+# hẳn. Bật lại bằng ENABLE_DOCS=1 khi cần thử tay trên máy mình.
+ENABLE_DOCS = os.environ.get("ENABLE_DOCS", "").strip().lower() in ("1", "true", "yes")
 
 # Trần thời gian tổng hợp MỘT câu. Kokoro chạy ~0.35x thời gian thực, nên một
 # câu 30 giây mất khoảng 10 giây; quá ngần này là nó đã kẹt chứ không phải
@@ -105,6 +109,10 @@ logging.basicConfig(
 logger = logging.getLogger("server")
 
 
+class JobCancelled(Exception):
+    """Job bị huỷ giữa chừng — không phải lỗi, không cần log traceback."""
+
+
 def _fmt_dur(sec: float) -> str:
     sec = max(0.0, sec)
     if sec >= 60:
@@ -116,6 +124,9 @@ app = FastAPI(
     title="Local AI Vietnamese Dubbing — TTS server",
     description="Chỉ API — dán API key vào nút Authorize phía trên để thử.",
     dependencies=[Depends(require_api_key)],
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -133,15 +144,39 @@ JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kokoro-job"
 
 @app.middleware("http")
 async def limit_body_size(request, call_next):
-    """Từ chối sớm theo Content-Length, trước khi đọc body vào RAM."""
+    """Chặn body quá lớn theo SỐ BYTE THẬT nhận được.
+
+    Chỉ nhìn Content-Length là hở: request chunked không khai header đó, và
+    khi ấy toàn bộ body vẫn được đọc vào RAM rồi mới bị validate từ chối.
+    """
+
+    too_large = JSONResponse(
+        {"detail": f"Body vượt {MAX_BODY_BYTES // (1024 * 1024)} MB"}, status_code=413
+    )
 
     length = request.headers.get("content-length")
     if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
-        return JSONResponse(
-            {"detail": f"Body vượt {MAX_BODY_BYTES // (1024 * 1024)} MB"},
-            status_code=413,
-        )
-    return await call_next(request)
+        return too_large
+
+    received = 0
+    original_receive = request.receive
+    overflowed = False
+
+    async def counting_receive():
+        nonlocal received, overflowed
+        message = await original_receive()
+        if message.get("type") == "http.request":
+            received += len(message.get("body", b""))
+            if received > MAX_BODY_BYTES:
+                overflowed = True
+                # Cắt luồng thay vì đọc tiếp: phần đã nhận bị bỏ, handler thấy
+                # body kết thúc sớm và trả lỗi, còn ta trả 413 ở dưới.
+                return {"type": "http.disconnect"}
+        return message
+
+    request._receive = counting_receive
+    response = await call_next(request)
+    return too_large if overflowed else response
 
 
 def _evict_old_jobs() -> None:
@@ -152,7 +187,7 @@ def _evict_old_jobs() -> None:
         expired = [
             job_id
             for job_id, job in JOBS.items()
-            if job.get("status") in ("done", "error")
+            if job.get("status") in ("done", "error", "cancelled")
             and job.get("finishedAt", 0) < cutoff
         ]
         for job_id in expired:
@@ -230,6 +265,12 @@ def _sweep_stale_job_dirs() -> None:
             logger.warning("Không dọn được thư mục job cũ: %s", path)
     if removed:
         logger.info("Đã dọn %d thư mục job sót lại từ lần chạy trước", removed)
+
+
+def _job_cancelled(job_id: str) -> bool:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return bool(job and job.get("cancelled"))
 
 
 def _validated_job_id(job_id: str) -> str:
@@ -345,11 +386,31 @@ def synthesize(req: SynthesizeRequest):
             "progress": 0.0,
             "audioUrl": None,
             "error": None,
+            "cancelled": False,
             "finishedAt": 0.0,
         }
 
     JOB_EXECUTOR.submit(_run_job, job_id, job_dir, req)
     return {"jobId": job_id}
+
+
+@app.delete("/api/job/{job_id}")
+def cancel_job(job_id: str):
+    """Dừng một job đang chạy.
+
+    Đóng tab lúc đang lồng tiếng không dừng được gì: server vẫn tổng hợp tới
+    hết trên worker duy nhất, mọi job khác xếp hàng phía sau hàng phút.
+    """
+
+    with JOBS_LOCK:
+        job = JOBS.get(_validated_job_id(job_id))
+        if not job:
+            raise HTTPException(404, "Không tìm thấy job")
+        if job["status"] in ("done", "error", "cancelled"):
+            return {"status": job["status"]}
+        job["cancelled"] = True
+    logger.info("Job %s: nhận yêu cầu huỷ", job_id)
+    return {"status": "cancelling"}
 
 
 @app.get("/api/job/{job_id}")
@@ -398,6 +459,8 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             req.durationSec,
         )
         for i, seg in enumerate(req.segments):
+            if _job_cancelled(job_id):
+                raise JobCancelled()
             raw_wav = job_dir / f"{seg.id:04d}_raw.wav"
             fit_wav = job_dir / f"{seg.id:04d}_fit.wav"
             text = seg.vi.strip()
@@ -467,6 +530,13 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         logger.info("%s XONG sau %s — synth chiếm %s | %.1fs audio | RTF %.2fx | %d câu bị cắt",
                     tag, _fmt_dur(elapsed), _fmt_dur(t_synth_total), audio_sec,
                     (t_synth_total / audio_sec) if audio_sec > 0 else 0.0, len(overflow))
+    except JobCancelled:
+        logger.info("%s ĐÃ HUỶ sau %s", tag, _fmt_dur(time.time() - t_job))
+        shutil.rmtree(job_dir, ignore_errors=True)
+        with JOBS_LOCK:
+            JOBS[job_id].update(
+                status="cancelled", error="Job bị huỷ theo yêu cầu", finishedAt=time.time()
+            )
     except OSError as e:
         # Errno 28/ENOSPC trên Linux, WinError 112 trên Windows.
         logger.exception("%s LỖI ĐĨA sau %s", tag, _fmt_dur(time.time() - t_job))
