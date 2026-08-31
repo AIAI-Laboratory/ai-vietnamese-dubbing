@@ -811,7 +811,7 @@
 
   function startDucking() {
     stopDucking();
-    if (!duckEnv) return;
+    if (!hasDuckEnvelope()) return;
     // 50 ms một bước: bước độ lợi đủ nhỏ để không nghe ra tiếng rít khi đổi.
     duckTimer = setInterval(applyBedVolume, 50);
   }
