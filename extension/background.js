@@ -714,7 +714,14 @@ async function cancelServerJob(settings, jobId) {
 }
 
 function post(port, type, data) {
-  try { port.postMessage({ type, ...data }); } catch (e) { /* port đã đóng, bỏ qua */ }
+  try {
+    port.postMessage({ type, ...data });
+  } catch (e) {
+    // Tab đóng giữa chừng là chuyện thường; còn lại (message quá lớn, cấu
+    // trúc không clone được) là lỗi thật và trước đây bị nuốt sạch.
+    const closed = /disconnected|closed/i.test(e && e.message ? e.message : '');
+    if (!closed) console.warn(`[dub] không gửi được message ${type}:`, e);
+  }
 }
 
 async function runJob(msg, port) {
@@ -818,10 +825,13 @@ async function runJob(msg, port) {
       post(port, 'PROGRESS', { stage: 'synthesize', pct: 55 + Math.round(p * 40), note: synthesizeNote(data) });
     },
     (win) => {
+      const first = windows.length === 0;
       windows.push(win);
       // Cửa sổ đầu tiên tới là người xem nghe được ngay, phần còn lại chạy nền.
       log(`cửa sổ ${win.index} [${win.startSec}s-${win.endSec}s] về sau ${((Date.now() - tTts) / 1000).toFixed(1)}s`);
-      post(port, 'WINDOW', { window: win, plan, translated, subtitles, terminology, verify });
+      // plan/phụ đề chỉ cần đi kèm cửa sổ đầu; gửi lại mỗi lần là nhân đôi
+      // một payload cỡ trăm KB cho mỗi cửa sổ.
+      post(port, 'WINDOW', first ? { window: win, plan, translated, subtitles } : { window: win });
     },
   );
   log(`TTS xong sau ${((Date.now() - tTts) / 1000).toFixed(1)}s — ${windows.length} cửa sổ`);
@@ -875,8 +885,11 @@ async function runResynth(msg, port) {
       post(port, 'PROGRESS', { stage: 'synthesize', pct: 10 + Math.round(p * 85), note: synthesizeNote(data) });
     },
     (win) => {
+      const first = windows.length === 0;
       windows.push(win);
-      post(port, 'WINDOW', { window: win, plan: msg.plan, translated: msg.translated, subtitles });
+      post(port, 'WINDOW', first
+        ? { window: win, plan: msg.plan, translated: msg.translated, subtitles }
+        : { window: win });
     },
   );
   post(port, 'DONE', {

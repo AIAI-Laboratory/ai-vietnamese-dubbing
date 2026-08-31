@@ -603,9 +603,16 @@
       const port = chrome.runtime.connect({ name: "dub-job" });
       port.onMessage.addListener((msg) => {
         if (msg.type === "PROGRESS") setPanel(msg.pct, msg.note, true);
-        else if (msg.type === "WINDOW") applyWindow(msg);
-        else if (msg.type === "DONE") {
-          // Cửa sổ đã phát dần rồi; DONE chỉ để lưu cache bản đầy đủ.
+        else if (msg.type === "WINDOW") {
+          try {
+            applyWindow(msg);
+          } catch (error) {
+            // Hỏng ở đây mà nuốt lỗi thì panel đứng im ở tiến độ cuối cùng,
+            // trông như treo. DONE bên dưới vẫn là lưới đỡ, nhưng phải biết.
+            warn("không dựng được cửa sổ audio:", error);
+            setPanel(0, "Lỗi khi nhận audio: " + (error && error.message ? error.message : error), true);
+          }
+        } else if (msg.type === "DONE") {
           DUB.cache
             .put(cacheKeyParts(videoId), {
               videoId,
@@ -615,6 +622,7 @@
             })
             .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
           reportTruncatedSentences(msg);
+          finalizeFromDone(msg);
         } else if (msg.type === "ERROR") {
           setPanel(0, "Lỗi: " + msg.message, true);
           currentState = "error";
@@ -650,6 +658,16 @@
         mime: record.audioMime,
         duckEnvelope: record.duckEnvelope,
       }];
+    // Dựng lại từ đầu: bỏ mọi cửa sổ đang có để không nhân đôi khi lưới đỡ
+    // DONE chạy sau khi vài cửa sổ đã về.
+    pauseAllWindows();
+    for (const win of audioWindows) {
+      releaseObjectUrl(win.el.src);
+      win.el.remove();
+    }
+    audioWindows = [];
+    activeWindow = null;
+
     for (const win of windows) addWindow(win);
     finishSetup();
   }
@@ -661,6 +679,28 @@
     currentSubtitles = msg.subtitles || currentSubtitles;
     addWindow(msg.window);
     if (audioWindows.length === 1) finishSetup();
+  }
+
+  /**
+   * Lưới đỡ cuối: DONE mang đủ mọi cửa sổ. Nếu đường phát dần không chạy
+   * (message WINDOW lỗi, hoặc extension và server lệch phiên bản) thì dựng
+   * lại từ đây thay vì để panel đứng im ở tiến độ cuối.
+   */
+  function finalizeFromDone(msg) {
+    if (currentState === "ready" && audioWindows.length) return;
+    const hasWindows = Array.isArray(msg.windows) && msg.windows.length;
+    if (!hasWindows && !msg.audioBase64) {
+      setPanel(
+        0,
+        "Server trả về job xong nhưng không có audio. Nhiều khả năng extension "
+          + "và server lệch phiên bản — tải lại extension rồi F5 trang.",
+        true,
+      );
+      currentState = "error";
+      return;
+    }
+    warn("đường phát dần không chạy, dựng lại từ bản đầy đủ khi job xong");
+    applyResult(msg);
   }
 
   /** Chuyển sang trạng thái "đang thuyết minh" khi đã có audio để phát. */
@@ -1151,6 +1191,7 @@
         }
         applyWindow(msg);
       } else if (msg.type === "DONE") {
+        if (!replaced) finalizeFromDone(msg); // không cửa sổ nào tới được
         DUB.cache
           .put(cacheKeyParts(videoId, voice), {
             videoId,
