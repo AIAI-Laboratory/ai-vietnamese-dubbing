@@ -1,5 +1,5 @@
 /**
- * Chạy: node --test extension/test/
+ * Chạy: node --test tests/
  *
  * plan.js là script cổ điển gắn vào globalThis.DUB (dùng chung cho content
  * script và service worker), nên nạp bằng vm thay vì import.
@@ -14,7 +14,7 @@ const context = { globalThis: {} };
 context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(
-  fs.readFileSync(path.join(__dirname, '..', 'lib', 'plan.js'), 'utf8'),
+  fs.readFileSync(path.join(__dirname, '..', 'extension', 'lib', 'plan.js'), 'utf8'),
   context,
 );
 const plan = context.DUB.plan;

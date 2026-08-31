@@ -1,11 +1,11 @@
-/** Chạy: node --test extension/test/sites.test.js */
+/** Chạy: node --test tests/sites.test.js */
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'lib', 'sites.js'), 'utf8');
+const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'extension', 'lib', 'sites.js'), 'utf8');
 
 /** Nạp sites.js với một location giả lập. */
 function loadAt(href) {

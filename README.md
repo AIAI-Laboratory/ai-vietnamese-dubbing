@@ -99,11 +99,12 @@ matching entry in `extension/manifest.json`.
 
 ## Verification
 
-- JavaScript syntax, Python compilation, and the unit tests are checked
-  locally before release:
+The extension folder holds only what ships; tests live in `tests/`.
+JavaScript syntax, Python compilation, and the unit tests are checked
+locally before release:
 
   ```bash
-  node --test extension/test/
+  node --test tests/*.test.js
   cd server && python -m unittest discover -p "test_*.py"
   ```
 - Kokoro model loading and CPU synthesis can be smoke-tested with the
