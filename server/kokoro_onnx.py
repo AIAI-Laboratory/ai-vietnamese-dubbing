@@ -156,9 +156,11 @@ def split_text(text: str) -> list[str]:
 
 
 def phonemize(text: str) -> str:
-    from vig2p import phonemize_text
+    """Chuyển câu thành phoneme cho model."""
 
-    return phonemize_text(text)
+    from phonemes import phonemize as _phonemize
+
+    return _phonemize(text)
 
 
 def fit_to_context(chunk: str, context_length: int) -> list[str]:
