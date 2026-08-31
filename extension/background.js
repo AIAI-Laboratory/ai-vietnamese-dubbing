@@ -643,6 +643,7 @@ async function ttsPoll(jobId, settings, onProgress) {
     if (onProgress) onProgress(data);
     if (data.status === 'done') return data;
     if (data.status === 'error') throw new Error('TTS server báo lỗi: ' + (data.error || 'không rõ nguyên nhân'));
+    if (data.status === 'cancelled') throw new Error('Job đã bị huỷ');
     await sleep(700);
   }
 }
@@ -679,6 +680,24 @@ async function fetchAudioAsBase64(audioUrl, serverBaseUrl, apiKey) {
 // Điều phối job qua Port — giữ service worker sống nhờ fetch liên tục trong
 // lúc chạy; job cho một bài giảng vài chục phút vẫn hoàn tất trong một lượt.
 // ---------------------------------------------------------------------------
+
+// jobId của TTS server đang chạy cho từng port. Đóng tab là port đóng, và khi
+// đó phải bảo server dừng: worker của nó chỉ có một, để job mồ côi chạy tiếp
+// nghĩa là mọi tab khác chờ dài.
+const jobsByPort = new WeakMap();
+
+async function cancelServerJob(settings, jobId) {
+  try {
+    await fetchServer(
+      settings.serverUrl.replace(/\/+$/, '') + '/api/job/' + jobId,
+      { method: 'DELETE', headers: authHeaders(settings.serverApiKey) },
+      'huỷ job',
+    );
+    log(`đã yêu cầu server huỷ job ${jobId}`);
+  } catch (error) {
+    console.warn('[dub] không huỷ được job trên server:', error);
+  }
+}
 
 function post(port, type, data) {
   try { port.postMessage({ type, ...data }); } catch (e) { /* port đã đóng, bỏ qua */ }
@@ -774,6 +793,7 @@ async function runJob(msg, port) {
   post(port, 'PROGRESS', { stage: 'synthesize', pct: 55, note: 'Đang gửi tới TTS server...' });
   const tTts = Date.now();
   const jobId = await ttsSynthesize(plan, translated, settings);
+  jobsByPort.set(port, { jobId, settings });
   log(`TTS job ${jobId} — đang tổng hợp ${plan.segments.length} câu...`);
   const done = await ttsPoll(jobId, settings, (data) => {
     const p = typeof data.progress === 'number' ? data.progress : 0;
@@ -783,11 +803,13 @@ async function runJob(msg, port) {
   post(port, 'PROGRESS', { stage: 'packaging', pct: 97, note: 'Đang đóng gói audio...' });
   const { base64, mime } = await fetchAudioAsBase64(done.audioUrl, settings.serverUrl, settings.serverApiKey);
 
+  jobsByPort.delete(port);
   post(port, 'DONE', {
     plan, terminology, translated, verify, subtitles,
     audioBase64: base64, audioMime: mime,
     measuredSyllablesPerSec: done.measuredSyllablesPerSec || null,
     duckEnvelope: done.duckEnvelope || null,
+    overflowSegmentIds: done.overflowSegmentIds || [],
   });
   await calibrateRate(settings, done.measuredSyllablesPerSec);
   log(`job xong toàn bộ sau ${((Date.now() - tJob) / 1000).toFixed(1)}s`);
@@ -822,6 +844,7 @@ async function runResynth(msg, port) {
 
   post(port, 'PROGRESS', { stage: 'synthesize', pct: 10, note: 'Đang tổng hợp lại với giọng mới...' });
   const jobId = await ttsSynthesize(msg.plan, msg.translated, { ...settings, voice: msg.voice || settings.voice });
+  jobsByPort.set(port, { jobId, settings });
   const done = await ttsPoll(jobId, settings, (data) => {
     const p = typeof data.progress === 'number' ? data.progress : 0;
     post(port, 'PROGRESS', { stage: 'synthesize', pct: 10 + Math.round(p * 85), note: synthesizeNote(data) });
@@ -830,11 +853,18 @@ async function runResynth(msg, port) {
   post(port, 'DONE', {
     plan: msg.plan, translated: msg.translated, subtitles,
     audioBase64: base64, audioMime: mime, duckEnvelope: done.duckEnvelope || null,
+    overflowSegmentIds: done.overflowSegmentIds || [],
   });
 }
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'dub-job') return;
+  port.onDisconnect.addListener(() => {
+    const running = jobsByPort.get(port);
+    if (!running) return;
+    jobsByPort.delete(port);
+    cancelServerJob(running.settings, running.jobId);
+  });
   port.onMessage.addListener((msg) => {
     const handler = msg.type === 'RESYNTH' ? runResynth : msg.type === 'START' ? runJob : null;
     if (!handler) return;
@@ -851,7 +881,8 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_CONTENT_SETTINGS') {
     loadSettings().then((settings) => {
-      const { geminiApiKey, ...contentSettings } = settings;
+      // Cả hai key đều ở lại service worker; content script không cần cái nào.
+      const { geminiApiKey, serverApiKey, ...contentSettings } = settings;
       sendResponse({ ok: true, settings: contentSettings });
     })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
@@ -893,13 +924,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+  // serverUrl/serverApiKey lấy từ storage, KHÔNG nhận theo message: content
+  // script chạy trong tiến trình của trang web, không có lý do gì để nó cầm
+  // key của server hay chỉ định được địa chỉ mà service worker sẽ gọi.
   if (msg.type === 'FETCH_TTS_VOICES') {
-    fetchVoices(msg.serverUrl, msg.serverApiKey, msg.timeoutMs).then((voices) => sendResponse({ ok: true, voices }))
+    loadSettings()
+      .then((settings) => fetchVoices(settings.serverUrl, settings.serverApiKey, msg.timeoutMs))
+      .then((voices) => sendResponse({ ok: true, voices }))
       .catch((e) => sendResponse({ ok: false, error: e.message }));
     return true;
   }
   if (msg.type === 'TTS_PREVIEW_LOCAL') {
-    previewVoice(msg.serverUrl, msg.serverApiKey, msg.text, msg.voice, msg.timeoutMs)
+    loadSettings()
+      .then((settings) => previewVoice(
+        settings.serverUrl, settings.serverApiKey, msg.text, msg.voice, msg.timeoutMs,
+      ))
       .then(({ base64, mime }) => sendResponse({ ok: true, base64, mime }))
       .catch((e) => sendResponse({ ok: false, error: e.message }));
     return true;

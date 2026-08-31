@@ -72,11 +72,33 @@
   let mode = "dubbed"; // dubbed | original
   let settings = { ...DEFAULT_SETTINGS };
   let voicesCache = null;
+  let truncatedIds = new Set(); // id câu server phải cắt bớt cho vừa khe
   // Đường bao ducking của bản lồng tiếng đang phát (uint8, mỗi mẫu là âm
   // lượng track gốc tại mốc index/duckFps giây). Xem audio_pipeline.duck_envelope.
   let duckEnv = null;
   let duckFps = 0;
   let duckTimer = null;
+  // Object URL sống theo vòng đời document chứ không theo phần tử: gỡ thẻ
+  // <audio> KHÔNG giải phóng blob. Không thu hồi tay thì mỗi lần lồng tiếng,
+  // đổi giọng hay điều hướng SPA để lại 5-15 MB trong tab tới khi đóng tab.
+  const liveObjectUrls = new Set();
+
+  function trackedObjectUrl(blob) {
+    const url = URL.createObjectURL(blob);
+    liveObjectUrls.add(url);
+    return url;
+  }
+
+  function releaseObjectUrl(url) {
+    if (!url || !liveObjectUrls.has(url)) return;
+    URL.revokeObjectURL(url);
+    liveObjectUrls.delete(url);
+  }
+
+  function releaseAllObjectUrls() {
+    for (const url of liveObjectUrls) URL.revokeObjectURL(url);
+    liveObjectUrls.clear();
+  }
   const previewAudioCache = new Map(); // voice -> {base64, mime} — nghe lại không tổng hợp lại
 
   // Adapter của trang đang mở. KHÔNG chốt một lần lúc nạp: content script chỉ
@@ -148,9 +170,11 @@
     stopDucking();
     if (audioEl) {
       audioEl.pause();
+      releaseObjectUrl(audioEl.src);
       audioEl.remove();
       audioEl = null;
     }
+    releaseAllObjectUrls();
     if (dockObserver) {
       dockObserver.disconnect();
       dockObserver = null;
@@ -495,6 +519,20 @@
     }
     if (currentState === "loading") return;
 
+    // Livestream cho duration = Infinity, video chưa nạp xong cho NaN. Server
+    // sẽ từ chối (durationSec phải hữu hạn, <= 6 giờ) NHƯNG chỉ ở bước cuối,
+    // sau khi đã trả tiền cho toàn bộ phần dịch.
+    if (!Number.isFinite(video.duration) || video.duration <= 0) {
+      setPanel(
+        0,
+        "Video này chưa có thời lượng xác định (livestream, hoặc chưa nạp xong). "
+          + "Không lồng tiếng được — thử lại khi video đã tải.",
+        true,
+      );
+      currentState = "error";
+      return;
+    }
+
     setPanel(2, "Đang đọc phụ đề tiếng Anh...", true);
     currentState = "loading";
 
@@ -557,6 +595,7 @@
 
   function applyResult(record) {
     loadDuckEnvelope(record);
+    reportTruncatedSentences(record);
     currentPlan = record.plan || null;
     currentTranslated = record.translated || null;
     currentSubtitles = record.subtitles;
@@ -567,12 +606,13 @@
     );
     if (audioEl) {
       audioEl.pause();
+      releaseObjectUrl(audioEl.src);
       audioEl.remove();
     }
     audioEl = document.createElement("audio");
     audioEl.id = "ldub-audio";
     audioEl.preload = "auto";
-    audioEl.src = URL.createObjectURL(blob);
+    audioEl.src = trackedObjectUrl(blob);
     audioEl.style.display = "none";
     document.body.appendChild(audioEl);
     try {
@@ -584,7 +624,13 @@
     }
 
     currentState = "ready";
-    setPanel(100, "Sẵn sàng — đã thuyết minh.", false);
+    setPanel(
+      100,
+      truncatedIds.size
+        ? `Sẵn sàng — ${truncatedIds.size} câu bị cắt cho vừa khe thời gian.`
+        : "Sẵn sàng — đã thuyết minh.",
+      false,
+    );
     setBtnLabel("Đang thuyết minh");
     dubBtn.classList.add("ldub-btn-active");
 
@@ -650,6 +696,28 @@
       clearInterval(duckTimer);
       duckTimer = null;
     }
+  }
+
+  /**
+   * Server cắt bớt câu nào không nhét vừa khe thì báo lại qua
+   * overflowSegmentIds. Không hiện ra thì người dùng nghe câu cụt mà tưởng
+   * bản dịch vốn thế.
+   */
+  function reportTruncatedSentences(record) {
+    const cut = Array.isArray(record.overflowSegmentIds) ? record.overflowSegmentIds : [];
+    truncatedIds = new Set(cut);
+    if (!cut.length) return;
+    console.warn(`[LDUB] ${cut.length} câu bị cắt cho vừa khe thời gian, id:`, cut);
+  }
+
+  /** Phát một câu mẫu rồi thu hồi blob ngay khi nghe xong. */
+  function playAndRelease(blob) {
+    const url = trackedObjectUrl(blob);
+    const audio = new Audio(url);
+    const release = () => releaseObjectUrl(url);
+    audio.addEventListener("ended", release, { once: true });
+    audio.addEventListener("error", release, { once: true });
+    audio.play().catch(release);
   }
 
   function base64ToBlob(base64, mime) {
@@ -847,9 +915,7 @@
 
     const cached = previewAudioCache.get(voice);
     if (cached) {
-      new Audio(
-        URL.createObjectURL(base64ToBlob(cached.base64, cached.mime)),
-      ).play();
+      playAndRelease(base64ToBlob(cached.base64, cached.mime));
       hint.textContent = "Đang phát (đã nhớ từ lần trước).";
       return;
     }
@@ -861,8 +927,6 @@
     try {
       const res = await chrome.runtime.sendMessage({
         type: "TTS_PREVIEW_LOCAL",
-        serverUrl: settings.serverUrl,
-        serverApiKey: settings.serverApiKey,
         voice,
         timeoutMs: 30000,
         text: "Xin chào, đây là giọng đọc thử cho video bài giảng tiếng Việt.",
@@ -872,8 +936,7 @@
         return;
       }
       previewAudioCache.set(voice, { base64: res.base64, mime: res.mime });
-      const blob = base64ToBlob(res.base64, res.mime || "audio/wav");
-      new Audio(URL.createObjectURL(blob)).play();
+      playAndRelease(base64ToBlob(res.base64, res.mime || "audio/wav"));
       hint.textContent = "Đang phát...";
     } finally {
       btn.disabled = false;
@@ -889,8 +952,6 @@
       sel.disabled = true;
       const res = await chrome.runtime.sendMessage({
         type: "FETCH_TTS_VOICES",
-        serverUrl: settings.serverUrl,
-        serverApiKey: settings.serverApiKey,
         timeoutMs: 15000,
       });
       if (!res.ok) {
