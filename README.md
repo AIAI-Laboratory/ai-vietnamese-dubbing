@@ -531,8 +531,8 @@ server/.venv/Scripts/python -m unittest discover -s tests -t tests
 
 Speech synthesis uses [Kokoro-Vietnamese](https://huggingface.co/contextboxai/Kokoro-Vietnamese) (Apache-2.0), with grapheme-to-phoneme conversion by [vig2p](https://pypi.org/project/vig2p/) over `sea-g2p`. Icons are from [Lucide](https://lucide.dev) (MIT).
 
-**Hà Trọng Nguyên** — [github.com/htrnguyen](https://github.com/htrnguyen)
+**Hà Trọng Nguyễn** — [github.com/htrnguyen](https://github.com/htrnguyen)
 
 Part of **AIAI Lab** — [github.com/AIAI-Laboratory](https://github.com/AIAI-Laboratory)
 
-Copyright © 2026 Hà Trọng Nguyên, AIAI Lab. Licensed under the [Apache License 2.0](LICENSE) — the same licence as Kokoro-Vietnamese, part of which `server/kokoro_onnx.py` reimplements.
+Copyright © 2026 Hà Trọng Nguyễn, AIAI Lab. Licensed under the [Apache License 2.0](LICENSE) — the same licence as Kokoro-Vietnamese, part of which `server/kokoro_onnx.py` reimplements.

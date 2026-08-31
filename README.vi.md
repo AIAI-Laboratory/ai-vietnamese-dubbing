@@ -531,8 +531,8 @@ server/.venv/Scripts/python -m unittest discover -s tests -t tests
 
 Giọng đọc dùng [Kokoro-Vietnamese](https://huggingface.co/contextboxai/Kokoro-Vietnamese) (Apache-2.0), phần chuyển chữ sang âm dùng [vig2p](https://pypi.org/project/vig2p/) trên nền `sea-g2p`. Bộ icon lấy từ [Lucide](https://lucide.dev) (MIT).
 
-**Hà Trọng Nguyên** — [github.com/htrnguyen](https://github.com/htrnguyen)
+**Hà Trọng Nguyễn** — [github.com/htrnguyen](https://github.com/htrnguyen)
 
 Thuộc **AIAI Lab** — [github.com/AIAI-Laboratory](https://github.com/AIAI-Laboratory)
 
-Bản quyền © 2026 Hà Trọng Nguyên, AIAI Lab. Phát hành theo [Apache License 2.0](LICENSE) — cùng giấy phép với Kokoro-Vietnamese, thứ mà `server/kokoro_onnx.py` viết lại một phần.
+Bản quyền © 2026 Hà Trọng Nguyễn, AIAI Lab. Phát hành theo [Apache License 2.0](LICENSE) — cùng giấy phép với Kokoro-Vietnamese, thứ mà `server/kokoro_onnx.py` viết lại một phần.
