@@ -258,9 +258,13 @@
 .ldub-voice-pick { display: flex; align-items: center; gap: 6px; width: 100%; }
 
 .ldub-voice {
-  background: rgba(255, 255, 255, .07);
-  color: #f5f5f7;
-  border: 1px solid var(--ldub-border);
+  /* Nền SÁNG dù panel tối: danh sách xổ xuống do hệ điều hành vẽ và không
+     nhận màu của mình một cách đáng tin (color-scheme và option{} có nơi ăn
+     nơi không). Cho ô chọn theo tông sáng thì popup mặc định của OS cũng là
+     nền sáng chữ đậm — đọc được ở mọi máy, thay vì trắng-trên-trắng. */
+  background: #f2f2f5;
+  color: #16161a;
+  border: 1px solid rgba(0, 0, 0, .18);
   border-radius: 7px;
   padding: 5px 8px;
   font-size: 12px;
@@ -272,14 +276,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
-  /* Danh sách xổ xuống do HỆ ĐIỀU HÀNH vẽ, không ăn theo màu của .ldub-voice.
-     Không khai hai thứ dưới đây thì trên nền sáng của trang, danh sách ra nền
-     trắng chữ xám nhạt — gần như không đọc được. */
-  color-scheme: dark;
+  color-scheme: light;
 }
 .ldub-voice option {
-  background: #17181c;
-  color: #f5f5f7;
+  background: #ffffff;
+  color: #16161a;
 }
 .ldub-voice:disabled { opacity: .55; cursor: default; }
 .ldub-voice:focus { outline: 2px solid var(--ldub-accent); outline-offset: 1px; }

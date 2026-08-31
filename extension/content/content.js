@@ -83,6 +83,10 @@
   let settings = { ...DEFAULT_SETTINGS };
   let voicesCache = null;
   let truncatedIds = new Set(); // id câu server phải cắt bớt cho vừa khe
+  // Có job đang chạy hay không. Trạng thái đèn suy ra từ đây chứ không từ
+  // phần trăm tiến độ: các mốc phần trăm đổi mỗi khi thêm bước vào pipeline,
+  // và đã có lần đèn báo xanh lá lúc còn đang dịch.
+  let jobRunning = false;
   let duckTimer = null;
   // Object URL sống theo vòng đời document chứ không theo phần tử: gỡ thẻ
   // <audio> KHÔNG giải phóng blob. Không thu hồi tay thì mỗi lần lồng tiếng,
@@ -189,6 +193,7 @@
       clearTimeout(dockRetryTimer);
       dockRetryTimer = null;
     }
+    jobRunning = false;
     if (dubBtn) {
       setStatus(null);
       dubBtn.remove();
@@ -542,6 +547,13 @@
     if (status) dubBtn.classList.add(`ldub-status-${status}`);
   }
 
+  /** Đèn = hàm của (có lỗi?, job còn chạy?, đã có audio chưa?). */
+  function refreshStatus() {
+    if (currentState === "error") return setStatus("error");
+    if (jobRunning) return setStatus(audioWindows.length ? "partial" : "working");
+    return setStatus(audioWindows.length ? "ready" : null);
+  }
+
   function setBtnLabel(text) {
     dubBtn.querySelector(".ldub-btn-text").textContent = text;
     dubBtn.title = text;
@@ -601,17 +613,19 @@
 
     setPanel(2, "Đang đọc phụ đề tiếng Anh...", true);
     currentState = "loading";
-    setStatus("working");
+    jobRunning = true;
+    refreshStatus();
 
     const videoId = videoIdFromUrl();
     try {
       const cached = await DUB.cache
         .get(cacheKeyParts(videoId))
         .catch(() => null);
-      if (cached && (cached.windows || cached.audioBase64)) {
+      if (hasPlayableAudio(cached)) {
         setPanel(80, "Đang tải từ cache...", true);
         applyResult(cached);
-        setStatus("ready");
+        jobRunning = false;
+        refreshStatus();
         return;
       }
 
@@ -638,7 +652,8 @@
             // trông như treo. DONE bên dưới vẫn là lưới đỡ, nhưng phải biết.
             warn("không dựng được cửa sổ audio:", error);
             setPanel(0, "Lỗi khi nhận audio: " + (error && error.message ? error.message : error), true);
-            setStatus("error");
+            currentState = "error";
+            refreshStatus();
           }
         } else if (msg.type === "DONE") {
           DUB.cache
@@ -651,11 +666,14 @@
             .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
           reportTruncatedSentences(msg);
           finalizeFromDone(msg);
-          setStatus(currentState === "error" ? "error" : "ready");
+          jobRunning = false;
+          refreshStatus();
+          if (dubBtn) dubBtn.title = "Thuyết minh tiếng Việt";
         } else if (msg.type === "ERROR") {
           setPanel(0, "Lỗi: " + msg.message, true);
           currentState = "error";
-          setStatus("error");
+          jobRunning = false;
+          refreshStatus();
         }
       });
       port.postMessage({
@@ -680,17 +698,21 @@
   function reportProgress(msg) {
     const playing = currentState === "ready" && audioWindows.length > 0;
     setPanel(msg.pct, msg.note, !playing);
-    if (!playing) {
-      setStatus("working");
-      return;
+    refreshStatus();
+    if (playing && dubBtn) {
+      dubBtn.title = `Đang tổng hợp phần còn lại — ${Math.round(msg.pct)}%`;
     }
-    const finished = msg.pct >= 99;
-    setStatus(finished ? "ready" : "partial");
-    if (dubBtn) {
-      dubBtn.title = finished
-        ? "Thuyết minh tiếng Việt"
-        : `Đang tổng hợp phần còn lại — ${Math.round(msg.pct)}%`;
-    }
+  }
+
+  /**
+   * Bản ghi có audio phát được không. Một bản ghi cũ lưu lúc pipeline còn
+   * hỏng có thể mang windows rỗng — nhận nó làm cache hit thì đèn báo xanh lá
+   * mà không có tiếng nào.
+   */
+  function hasPlayableAudio(record) {
+    if (!record) return false;
+    if (record.audioBase64) return true;
+    return Array.isArray(record.windows) && record.windows.some((win) => win && win.base64);
   }
 
   /** Bản ghi đầy đủ (từ cache, hoặc lúc job xong): dựng lại mọi cửa sổ. */
@@ -769,7 +791,7 @@
     );
     setBtnLabel("Đang thuyết minh");
     dubBtn.classList.add("ldub-btn-active");
-    setStatus("partial");
+    refreshStatus();
 
     injectControls();
     startSync();

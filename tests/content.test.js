@@ -347,3 +347,38 @@ test('job lỗi thì chấm chuyển đỏ', async () => {
   await new Promise((r) => setTimeout(r, 10));
   assert.strictEqual(statusOf(harness), 'error');
 });
+
+
+test('đèn không được xanh lá khi job còn đang chạy', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+
+  // Mọi mốc tiến độ trong lúc dịch/tổng hợp đều KHÔNG được báo xong.
+  for (const pct of [12, 50, 95, 97, 99, 100]) {
+    port.__deliver({ type: 'PROGRESS', pct, note: `bước ${pct}%` });
+    await new Promise((r) => setTimeout(r, 2));
+    assert.strictEqual(statusOf(harness), 'working', `pct=${pct} vẫn đang chạy, chưa có audio`);
+  }
+
+  // Có audio rồi nhưng job chưa xong -> xanh dương, kể cả khi pct = 100.
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  port.__deliver({ type: 'PROGRESS', pct: 100, note: 'gần xong' });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(statusOf(harness), 'partial');
+
+  // Chỉ DONE mới là xanh lá.
+  port.__deliver({ type: 'DONE', plan: PLAN, subtitles: SUBTITLES, windows: [], overflowSegmentIds: [] });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(statusOf(harness), 'ready');
+});
+
+test('bản ghi cache rỗng audio không được coi là đã xong', async () => {
+  // Bản ghi lưu lúc pipeline còn hỏng có windows rỗng: nhận nó làm cache hit
+  // thì đèn xanh lá mà không có tiếng nào.
+  const harness = loadContentScript();
+  harness.context.DUB.cache.get = async () => ({ windows: [], plan: PLAN, subtitles: SUBTITLES });
+  const port = await startJob(harness);
+
+  assert.strictEqual(statusOf(harness), 'working', 'phải chạy job thật chứ không dùng cache rỗng');
+  assert.ok(port.sent.some((m) => m.type === 'START'), 'phải gửi START để dịch lại');
+});
