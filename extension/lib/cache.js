@@ -15,6 +15,9 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const DB_NAME = 'local-ai-vi-dub';
   const STORE = 'dubs';
   const DB_VERSION = 1;
+  // Mỗi bản ghi mang theo audio 5-15 MB. Không giới hạn thì IndexedDB của
+  // trang phình tới khi chạm quota rồi mọi lần ghi sau đều hỏng.
+  const MAX_RECORDS = 12;
 
   function openDb() {
     return new Promise((resolve, reject) => {
@@ -57,13 +60,30 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
   async function put(keyParts, record) {
     const db = await openDb();
-    return new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
       tx.objectStore(STORE).put({ key: makeKey(keyParts), ...record, savedAt: Date.now() });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error); // quota đầy đi đường này
+    });
+    await trim(db);
+  }
+
+  /** Giữ MAX_RECORDS bản mới nhất, xoá phần còn lại. */
+  function trim(db) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const records = (req.result || []).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+        for (const stale of records.slice(MAX_RECORDS)) store.delete(stale.key);
+      };
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
   }
 
-  DUB.cache = { get, put };
+  DUB.cache = { get, put, MAX_RECORDS };
 })();

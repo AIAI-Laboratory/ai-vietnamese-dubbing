@@ -117,6 +117,8 @@ function currentGeminiConfig() {
   };
 }
 
+let loadedSyllableRate = "";
+
 async function load() {
   const stored = await chrome.storage.local.get("settings");
   const s = { ...DEFAULTS, ...(stored.settings || {}) };
@@ -145,6 +147,10 @@ async function load() {
   }
 
   $("viSyllablesPerSec").value = s.viSyllablesPerSec;
+  // Nhớ giá trị lúc mở trang: nếu người dùng không sửa ô này thì lúc lưu phải
+  // giữ nguyên giá trị đang có trong storage, vì mỗi job xong lại tự hiệu
+  // chỉnh nó — ghi giá trị cũ của form lên là xoá mất kết quả hiệu chỉnh.
+  loadedSyllableRate = String(s.viSyllablesPerSec);
 
   onCheckServer(); // tự kiểm tra ngay khi mở trang, không bắt bấm tay
 }
@@ -163,10 +169,13 @@ async function save() {
     serverApiKey: $("serverApiKey").value.trim(),
     voice: $("voice").value,
 
-    viSyllablesPerSec:
-      +$("viSyllablesPerSec").value || DEFAULTS.viSyllablesPerSec,
     planVersion: DEFAULTS.planVersion,
   };
+  const typedRate = $("viSyllablesPerSec").value;
+  if (typedRate !== loadedSyllableRate) {
+    settings.viSyllablesPerSec = +typedRate || DEFAULTS.viSyllablesPerSec;
+    loadedSyllableRate = typedRate;
+  }
   delete settings.apiBaseUrl;
   delete settings.apiKey;
   delete settings.model;
@@ -300,7 +309,12 @@ function playPreviewBase64(base64, mime) {
   const blob = new Blob([arr], { type: mime || "audio/wav" });
   const audio = $("previewAudio");
   audio.hidden = false;
-  audio.src = URL.createObjectURL(blob);
+  // Thu hồi blob của lần nghe trước: object URL sống theo document, gán src
+  // mới không giải phóng cái cũ, nghe thử nhiều giọng là tích luỹ trong trang.
+  if (audio.dataset.blobUrl) URL.revokeObjectURL(audio.dataset.blobUrl);
+  const url = URL.createObjectURL(blob);
+  audio.dataset.blobUrl = url;
+  audio.src = url;
   audio.play();
 }
 
