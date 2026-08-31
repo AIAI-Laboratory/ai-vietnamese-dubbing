@@ -634,14 +634,28 @@ function formatDur(sec) {
   return `${sec.toFixed(1)}s`;
 }
 
-async function ttsPoll(jobId, settings, onProgress) {
+/**
+ * Theo dõi job và tải từng cửa sổ audio ngay khi server công bố, không chờ
+ * cả bài xong. onWindow nhận cửa sổ đã kèm audio base64.
+ */
+async function ttsPoll(jobId, settings, onProgress, onWindow) {
   const url = settings.serverUrl.replace(/\/+$/, '') + '/api/job/' + jobId;
+  let fetched = 0;
   for (;;) {
     const res = await fetchServer(url, { headers: authHeaders(settings.serverApiKey) }, 'theo dõi tiến độ job');
     if (!res.ok) throw new Error('Không lấy được trạng thái job TTS: ' + buildErrorDetail(res.status, await res.text().catch(() => '')));
     const data = await res.json();
     if (onProgress) onProgress(data);
-    if (data.status === 'done') return data;
+
+    const windows = Array.isArray(data.windows) ? data.windows : [];
+    while (fetched < windows.length) {
+      const win = windows[fetched];
+      const { base64, mime } = await fetchAudioAsBase64(win.url, settings.serverUrl, settings.serverApiKey);
+      fetched++;
+      if (onWindow) await onWindow({ ...win, base64, mime });
+    }
+
+    if (data.status === 'done') return { ...data, windowsFetched: fetched };
     if (data.status === 'error') throw new Error('TTS server báo lỗi: ' + (data.error || 'không rõ nguyên nhân'));
     if (data.status === 'cancelled') throw new Error('Job đã bị huỷ');
     await sleep(700);
@@ -795,20 +809,27 @@ async function runJob(msg, port) {
   const jobId = await ttsSynthesize(plan, translated, settings);
   jobsByPort.set(port, { jobId, settings });
   log(`TTS job ${jobId} — đang tổng hợp ${plan.segments.length} câu...`);
-  const done = await ttsPoll(jobId, settings, (data) => {
-    const p = typeof data.progress === 'number' ? data.progress : 0;
-    post(port, 'PROGRESS', { stage: 'synthesize', pct: 55 + Math.round(p * 40), note: synthesizeNote(data) });
-  });
-  log(`TTS xong sau ${((Date.now() - tTts) / 1000).toFixed(1)}s`);
-  post(port, 'PROGRESS', { stage: 'packaging', pct: 97, note: 'Đang đóng gói audio...' });
-  const { base64, mime } = await fetchAudioAsBase64(done.audioUrl, settings.serverUrl, settings.serverApiKey);
+  const windows = [];
+  const done = await ttsPoll(
+    jobId,
+    settings,
+    (data) => {
+      const p = typeof data.progress === 'number' ? data.progress : 0;
+      post(port, 'PROGRESS', { stage: 'synthesize', pct: 55 + Math.round(p * 40), note: synthesizeNote(data) });
+    },
+    (win) => {
+      windows.push(win);
+      // Cửa sổ đầu tiên tới là người xem nghe được ngay, phần còn lại chạy nền.
+      log(`cửa sổ ${win.index} [${win.startSec}s-${win.endSec}s] về sau ${((Date.now() - tTts) / 1000).toFixed(1)}s`);
+      post(port, 'WINDOW', { window: win, plan, translated, subtitles, terminology, verify });
+    },
+  );
+  log(`TTS xong sau ${((Date.now() - tTts) / 1000).toFixed(1)}s — ${windows.length} cửa sổ`);
 
   jobsByPort.delete(port);
   post(port, 'DONE', {
-    plan, terminology, translated, verify, subtitles,
-    audioBase64: base64, audioMime: mime,
+    plan, terminology, translated, verify, subtitles, windows,
     measuredSyllablesPerSec: done.measuredSyllablesPerSec || null,
-    duckEnvelope: done.duckEnvelope || null,
     overflowSegmentIds: done.overflowSegmentIds || [],
   });
   await calibrateRate(settings, done.measuredSyllablesPerSec);
@@ -845,14 +866,21 @@ async function runResynth(msg, port) {
   post(port, 'PROGRESS', { stage: 'synthesize', pct: 10, note: 'Đang tổng hợp lại với giọng mới...' });
   const jobId = await ttsSynthesize(msg.plan, msg.translated, { ...settings, voice: msg.voice || settings.voice });
   jobsByPort.set(port, { jobId, settings });
-  const done = await ttsPoll(jobId, settings, (data) => {
-    const p = typeof data.progress === 'number' ? data.progress : 0;
-    post(port, 'PROGRESS', { stage: 'synthesize', pct: 10 + Math.round(p * 85), note: synthesizeNote(data) });
-  });
-  const { base64, mime } = await fetchAudioAsBase64(done.audioUrl, settings.serverUrl, settings.serverApiKey);
+  const windows = [];
+  const done = await ttsPoll(
+    jobId,
+    settings,
+    (data) => {
+      const p = typeof data.progress === 'number' ? data.progress : 0;
+      post(port, 'PROGRESS', { stage: 'synthesize', pct: 10 + Math.round(p * 85), note: synthesizeNote(data) });
+    },
+    (win) => {
+      windows.push(win);
+      post(port, 'WINDOW', { window: win, plan: msg.plan, translated: msg.translated, subtitles });
+    },
+  );
   post(port, 'DONE', {
-    plan: msg.plan, translated: msg.translated, subtitles,
-    audioBase64: base64, audioMime: mime, duckEnvelope: done.duckEnvelope || null,
+    plan: msg.plan, translated: msg.translated, subtitles, windows,
     overflowSegmentIds: done.overflowSegmentIds || [],
   });
 }

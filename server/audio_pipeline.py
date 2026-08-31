@@ -63,6 +63,11 @@ DUCK_RELEASE_SEC = 0.40
 # tính đường bao.
 STREAM_CHUNK_FRAMES = 1 << 16  # 65536 frame ~ 2.7 giây, 128 KB
 
+# Bài giảng được cắt thành cửa sổ để phát được trước khi tổng hợp xong cả
+# bài. Ranh giới luôn rơi vào mốc bắt đầu của một câu, nên không câu nào bị
+# xẻ đôi giữa hai file.
+WINDOW_TARGET_SEC = 30.0
+
 
 def _one_pole(tau_sec: float, fps: int) -> float:
     return math.exp(-1.0 / max(1e-6, tau_sec * fps))
@@ -103,6 +108,42 @@ def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict | None:
     if not quantized:
         return None
     return {"fps": fps, "data": base64.b64encode(bytes(quantized)).decode("ascii")}
+
+
+def plan_windows(segments: list[dict], duration_sec: float,
+                 target_sec: float = WINDOW_TARGET_SEC) -> list[dict]:
+    """Gom câu thành cửa sổ ~target_sec giây để phát dần.
+
+    Cửa sổ đầu bắt đầu từ giây 0 (không phải từ câu đầu tiên) để mốc thời
+    gian của người xem và của file audio luôn lệch nhau đúng bằng startSec.
+    Cửa sổ cuối kéo tới hết video.
+    """
+
+    ordered = sorted(segments, key=lambda seg: seg["start"])
+    if not ordered:
+        return []
+
+    windows: list[dict] = []
+    current: list[dict] = []
+    start = 0.0
+    for seg in ordered:
+        # Câu này mở một cửa sổ mới nếu cửa sổ hiện tại đã đủ dài.
+        if current and seg["start"] - start >= target_sec:
+            windows.append({"start": start, "end": seg["start"], "segments": current})
+            start = seg["start"]
+            current = []
+        current.append(seg)
+    windows.append({"start": start, "end": max(duration_sec, ordered[-1]["end"]), "segments": current})
+
+    return [
+        {
+            "index": index,
+            "startSec": round(window["start"], 3),
+            "endSec": round(window["end"], 3),
+            "segmentIds": [seg["id"] for seg in window["segments"]],
+        }
+        for index, window in enumerate(windows)
+    ]
 
 
 def available_slots(segments: list[dict], duration_sec: float) -> dict[int, float]:

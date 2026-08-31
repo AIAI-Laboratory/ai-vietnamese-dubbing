@@ -8,8 +8,13 @@ gắn kèm.
   GET  /api/voices              -> {"voices":[{"id","label"}]} (503 nếu đang loading)
   POST /api/preview             body {text,voice} -> file WAV
   POST /api/synthesize          body {voice,durationSec,segments:[{id,start,end,vi}]} -> {"jobId"}
-  GET  /api/job/{jobId}         -> {"status","progress","audioUrl","measuredSyllablesPerSec","segments","duckEnvelope","error",...}
-  GET  /audio/{jobId}.{ext}     -> file audio
+  GET  /api/job/{jobId}         -> {"status","progress","windows":[{index,startSec,endSec,url,duckEnvelope}],...}
+  GET  /audio/{jobId}/w{i}.{ext} -> audio của một cửa sổ
+
+Audio trả về theo CỬA SỔ ~30 giây chứ không phải một file dài bằng video:
+cửa sổ đầu sẵn sàng sau vài giây nên người xem nghe được gần như ngay, phần
+còn lại tổng hợp trong lúc đang phát. Ranh giới cửa sổ luôn rơi đúng mốc bắt
+đầu một câu nên không câu nào bị xẻ đôi.
 
 TOÀN BỘ route trên khoá bằng header X-API-Key (xem auth.py) — BẮT BUỘC,
 không có kiểu "để trống = không khoá": server chỉ chạy qua API nên nếu
@@ -389,7 +394,7 @@ def synthesize(req: SynthesizeRequest):
         JOBS[job_id] = {
             "status": "queued",
             "progress": 0.0,
-            "audioUrl": None,
+            "windows": [],
             "error": None,
             "cancelled": False,
             "finishedAt": 0.0,
@@ -427,13 +432,17 @@ def job_status(job_id: str):
     return job
 
 
-@app.get("/audio/{job_id}.{ext}")
-def get_audio(job_id: str, ext: str):
+@app.get("/audio/{job_id}/w{index}.{ext}")
+def get_window_audio(job_id: str, index: int, ext: str):
+    """Một cửa sổ audio. Client tải ngay khi cửa sổ đó sẵn sàng, không chờ hết bài."""
+
     if ext not in AUDIO_EXTS:
         raise HTTPException(404, "Định dạng audio không hợp lệ")
-    path = WORK_DIR / _validated_job_id(job_id) / f"final.{ext}"
+    if index < 0 or index > 10000:
+        raise HTTPException(404, "Chỉ số cửa sổ không hợp lệ")
+    path = WORK_DIR / _validated_job_id(job_id) / f"w{index}.{ext}"
     if not path.exists():
-        raise HTTPException(404, "Chưa có file audio (job chưa xong hoặc job_id sai)")
+        raise HTTPException(404, "Cửa sổ chưa sẵn sàng (hoặc job_id sai)")
     media_type = "audio/opus" if ext == "opus" else "audio/mpeg"
     return FileResponse(path, media_type=media_type)
 
@@ -457,12 +466,19 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
 
     try:
         meta = []
-        segment_wavs = []
         t_synth_total = 0.0
+        segment_by_id = {seg.id: seg for seg in req.segments}
         slots = audio_pipeline.available_slots(
             [{"id": s.id, "start": s.start, "end": s.end} for s in req.segments],
             req.durationSec,
         )
+        windows = audio_pipeline.plan_windows(
+            [{"id": s.id, "start": s.start, "end": s.end} for s in req.segments],
+            req.durationSec,
+        )
+        set_progress(0.0, status="running", totalWindows=len(windows), totalSegments=total, windows=[])
+        logger.info("%s %d câu -> %d cửa sổ (~%.0fs mỗi cửa sổ)",
+                    tag, total, len(windows), audio_pipeline.WINDOW_TARGET_SEC)
 
         def synthesize_one(seg):
             """Tổng hợp một câu và nén cho vừa khe. Chạy trên nhiều luồng."""
@@ -471,16 +487,16 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
                 raise JobCancelled()
             raw_wav = job_dir / f"{seg.id:04d}_raw.wav"
             fit_wav = job_dir / f"{seg.id:04d}_fit.wav"
-            text = seg.vi.strip()
+            text_vi = seg.vi.strip()
             slot_sec = slots[seg.id]
 
             t0 = time.time()
-            result = _synth_with_timeout(text, raw_wav, req.voice, 1.0)
+            result = _synth_with_timeout(text_vi, raw_wav, req.voice, 1.0)
             base_sec = result.duration_sec
             # Vượt khe: đọc lại nhanh hơn bằng tốc độ native — prosody vẫn tự
             # nhiên, hơn hẳn kéo giãn tín hiệu bằng atempo ở bước sau.
             if base_sec > slot_sec + 0.02:
-                result = _synth_with_timeout(text, raw_wav, req.voice, base_sec / slot_sec)
+                result = _synth_with_timeout(text_vi, raw_wav, req.voice, base_sec / slot_sec)
             t_synth = time.time() - t0
 
             info = audio_pipeline.stretch_to_fit(raw_wav, fit_wav, result.duration_sec, slot_sec)
@@ -489,59 +505,83 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             # phải tính trên nó, không phải trên bản đã tăng tốc.
             info.update(
                 id=seg.id,
-                syllables=tts_engine.count_vi_syllables(text),
+                syllables=tts_engine.count_vi_syllables(text_vi),
                 speed=result.speed,
                 baseSec=round(base_sec, 3),
                 peak=result.peak,
             )
             return info, ({"start": seg.start, "end": seg.end}, fit_wav), t_synth
 
+        done_segments = 0
+        published: list[dict] = []
         workers = min(SYNTH_WORKERS, total)
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kokoro-seg") as pool:
-            # map trả kết quả đúng thứ tự câu, nên tiến độ và log vẫn tuần tự
-            # dù việc chạy song song.
-            for i, (info, pair, t_synth) in enumerate(pool.map(synthesize_one, req.segments)):
-                meta.append(info)
-                segment_wavs.append(pair)
-                t_synth_total += t_synth
-                elapsed = time.time() - t_job
-                eta = (elapsed / (i + 1)) * (total - i - 1)
-                logger.info("%s [%3d/%d] id=%-4d %2d âm tiết | synth %5.2fs -> %5.2fs audio | khe %5.2fs | speed %.2fx | nén %.2fx%s | còn ~%s",
-                            tag, i + 1, total, info["id"], info["syllables"], t_synth, info["naturalSec"], info["slotSec"], info["speed"], info["stretch"],
-                            " | CẮT BỚT" if info["overflowTruncated"] else "", _fmt_dur(eta))
-                set_progress((i + 1) / total * 0.7, etaSec=round(eta, 1), doneSegments=i + 1, totalSegments=total)
+            for window in windows:
+                segments = [segment_by_id[i] for i in window["segmentIds"]]
+                window_wavs = []
+                # map trả kết quả đúng thứ tự câu, nên log vẫn tuần tự dù việc
+                # tổng hợp chạy song song.
+                for info, (position, fit_wav), t_synth in pool.map(synthesize_one, segments):
+                    meta.append(info)
+                    t_synth_total += t_synth
+                    done_segments += 1
+                    # Câu được đặt tương đối so với đầu cửa sổ, không phải đầu video.
+                    window_wavs.append((
+                        {"start": position["start"] - window["startSec"], "end": position["end"]},
+                        fit_wav,
+                    ))
+                    elapsed = time.time() - t_job
+                    eta = (elapsed / done_segments) * (total - done_segments)
+                    logger.info("%s [%3d/%d] id=%-4d %2d âm tiết | synth %5.2fs -> %5.2fs audio | khe %5.2fs | speed %.2fx | nén %.2fx%s | còn ~%s",
+                                tag, done_segments, total, info["id"], info["syllables"], t_synth, info["naturalSec"], info["slotSec"], info["speed"], info["stretch"],
+                                " | CẮT BỚT" if info["overflowTruncated"] else "", _fmt_dur(eta))
+                    set_progress(done_segments / total * 0.95, etaSec=round(eta, 1),
+                                 doneSegments=done_segments, totalSegments=total)
 
-        master_wav = job_dir / "master.wav"
-        t0 = time.time()
-        audio_pipeline.assemble_timeline(segment_wavs, req.durationSec, master_wav)
-        duck = audio_pipeline.duck_envelope(master_wav)
-        logger.info("%s ghép %d câu vào timeline %.1fs — xong sau %.2fs", tag, total, req.durationSec, time.time() - t0)
-        set_progress(0.85)
+                if _job_cancelled(job_id):
+                    raise JobCancelled()
 
-        final_no_ext = job_dir / "final"
-        t0 = time.time()
-        content_type, final_path = audio_pipeline.export_final(master_wav, final_no_ext)
-        ext = "opus" if content_type == "audio/opus" else "mp3"
-        logger.info("%s encode -> %s (%s) sau %.2fs — %.1f KB", tag, ext, content_type, time.time() - t0, final_path.stat().st_size / 1024)
+                window_wav = job_dir / f"w{window['index']}.wav"
+                span = max(0.05, window["endSec"] - window["startSec"])
+                audio_pipeline.assemble_timeline(window_wavs, span, window_wav)
+                duck = audio_pipeline.duck_envelope(window_wav)
+                content_type, audio_path = audio_pipeline.export_final(
+                    window_wav, job_dir / f"w{window['index']}"
+                )
+                window_wav.unlink(missing_ok=True)
+                for _, wav_path in window_wavs:
+                    wav_path.unlink(missing_ok=True)
+
+                ext = "opus" if content_type == "audio/opus" else "mp3"
+                published.append({
+                    "index": window["index"],
+                    "startSec": window["startSec"],
+                    "endSec": window["endSec"],
+                    "url": f"/audio/{job_id}/w{window['index']}.{ext}",
+                    "duckEnvelope": duck,
+                })
+                # Công bố ngay: client tải và phát cửa sổ này trong lúc các cửa
+                # sổ sau còn đang tổng hợp.
+                with JOBS_LOCK:
+                    JOBS[job_id]["windows"] = list(published)
+                logger.info("%s cửa sổ %d/%d sẵn sàng [%.1fs-%.1fs] — %.0f KB",
+                            tag, window["index"] + 1, len(windows), window["startSec"],
+                            window["endSec"], audio_path.stat().st_size / 1024)
 
         rates = [m["syllables"] / m["baseSec"] for m in meta if m["baseSec"] > 0]
         measured_rate = round(statistics.median(rates), 3) if rates else None
         overflow = [m["id"] for m in meta if m["overflowTruncated"]]
 
-        master_wav.unlink(missing_ok=True)
-        for _, wav_path in segment_wavs:
-            wav_path.unlink(missing_ok=True)
-
         with JOBS_LOCK:
             JOBS[job_id].update(
-                status="done", progress=1.0, audioUrl=f"/audio/{job_id}.{ext}",
+                status="done", progress=1.0,
                 measuredSyllablesPerSec=measured_rate, overflowSegmentIds=overflow, segments=meta,
-                duckEnvelope=duck, finishedAt=time.time(),
+                finishedAt=time.time(),
             )
         audio_sec = sum(m["finalSec"] for m in meta)
         elapsed = time.time() - t_job
-        logger.info("%s XONG sau %s — %d luồng | %.1fs audio | RTF %.2fx | %d câu bị cắt",
-                    tag, _fmt_dur(elapsed), min(SYNTH_WORKERS, total), audio_sec,
+        logger.info("%s XONG sau %s — %d luồng | %d cửa sổ | %.1fs audio | RTF %.2fx | %d câu bị cắt",
+                    tag, _fmt_dur(elapsed), workers, len(windows), audio_sec,
                     (elapsed / audio_sec) if audio_sec > 0 else 0.0, len(overflow))
     except JobCancelled:
         logger.info("%s ĐÃ HUỶ sau %s", tag, _fmt_dur(time.time() - t_job))

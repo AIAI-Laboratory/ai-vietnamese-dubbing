@@ -305,3 +305,45 @@ class SentenceChunkingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowPlanTest(unittest.TestCase):
+    """Cửa sổ để phát dần: ranh giới phải rơi đúng mốc bắt đầu một câu."""
+
+    def segments(self, count, step=7.0, length=5.0):
+        return [{"id": i + 1, "start": i * step, "end": i * step + length} for i in range(count)]
+
+    def test_windows_tile_the_video_without_gaps(self):
+        windows = ap.plan_windows(self.segments(12), 90.0, target_sec=30.0)
+        self.assertEqual(windows[0]["startSec"], 0.0)
+        self.assertGreaterEqual(windows[-1]["endSec"], 90.0)
+        for earlier, later in zip(windows, windows[1:]):
+            self.assertEqual(earlier["endSec"], later["startSec"])
+
+    def test_no_sentence_is_lost_or_duplicated(self):
+        segments = self.segments(12)
+        ids = [i for w in ap.plan_windows(segments, 90.0, target_sec=30.0) for i in w["segmentIds"]]
+        self.assertEqual(ids, sorted(ids))
+        self.assertEqual(sorted(ids), [s["id"] for s in segments])
+
+    def test_a_boundary_always_falls_on_a_sentence_start(self):
+        segments = self.segments(12)
+        starts = {s["start"] for s in segments}
+        windows = ap.plan_windows(segments, 90.0, target_sec=30.0)
+        for window in windows[1:]:
+            self.assertIn(window["startSec"], starts)
+
+    def test_one_sentence_gives_one_window_covering_the_video(self):
+        windows = ap.plan_windows([{"id": 1, "start": 5.0, "end": 8.0}], 60.0)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["startSec"], 0.0)
+        self.assertEqual(windows[0]["endSec"], 60.0)
+
+    def test_no_segments_gives_no_windows(self):
+        self.assertEqual(ap.plan_windows([], 60.0), [])
+
+    def test_unsorted_input_is_ordered_first(self):
+        segments = list(reversed(self.segments(8)))
+        windows = ap.plan_windows(segments, 60.0, target_sec=20.0)
+        starts = [w["startSec"] for w in windows]
+        self.assertEqual(starts, sorted(starts))

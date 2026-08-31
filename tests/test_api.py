@@ -52,7 +52,8 @@ class AuthTest(unittest.TestCase):
         for method, path in [
             ("get", "/api/health"), ("get", "/api/voices"),
             ("post", "/api/preview"), ("post", "/api/synthesize"),
-            ("get", "/api/job/" + "a" * 16), ("get", f"/audio/{'a' * 16}.opus"),
+            ("get", "/api/job/" + "a" * 16), ("get", f"/audio/{'a' * 16}/w0.opus"),
+            ("delete", "/api/job/" + "a" * 16),
         ]:
             with self.subTest(path=path):
                 self.assertEqual(getattr(self.client, method)(path).status_code, 401)
@@ -103,8 +104,14 @@ class RequestLimitTest(unittest.TestCase):
         res = self.client.post("/api/synthesize", headers=KEY, content=stream())
         self.assertEqual(res.status_code, 413)
 
-    def test_malformed_job_id_and_extension_are_refused(self):
-        for path in ("/audio/khong-hop-le.opus", f"/audio/{'a' * 16}.exe", "/api/job/..%2f"):
+    def test_malformed_job_id_index_and_extension_are_refused(self):
+        for path in (
+            "/audio/khong-hop-le/w0.opus",      # job id không đúng dạng
+            f"/audio/{'a' * 16}/w0.exe",        # đuôi file không cho phép
+            f"/audio/{'a' * 16}/w-1.opus",      # chỉ số âm
+            f"/audio/{'a' * 16}/w999999.opus",  # chỉ số ngoài biên
+            "/api/job/..%2f",
+        ):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path, headers=KEY).status_code, 404)
 

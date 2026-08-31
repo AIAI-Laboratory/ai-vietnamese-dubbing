@@ -24,7 +24,8 @@ Group captions into sentences, budget syllables per sentence
 Translate EN -> VI via Gemini API
         |
         v
-Synthesize speech (local Kokoro-Vietnamese ONNX, CPU)
+Synthesize speech (local Kokoro-Vietnamese ONNX, CPU), in ~30s windows
+        |  each window plays as soon as it is ready
         |  time-stretch/trim each sentence to fit its slot
         v
 Assemble one audio track, exact length of the video

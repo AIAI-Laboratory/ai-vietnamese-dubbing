@@ -60,7 +60,11 @@
   let dubBtn = null;
   let dockObserver = null;
   let dockRetryTimer = null;
-  let audioEl = null;
+  // Audio đến theo cửa sổ ~30s, mỗi cửa sổ một thẻ <audio> phủ đúng đoạn
+  // [startSec, endSec) của video. Nghe được ngay khi cửa sổ đầu về, phần còn
+  // lại tổng hợp trong lúc đang phát.
+  let audioWindows = [];
+  let activeWindow = null;
   let subtitleEl = null;
   let controlsEl = null;
   let currentState = "idle"; // idle | loading | ready | error
@@ -73,10 +77,6 @@
   let settings = { ...DEFAULT_SETTINGS };
   let voicesCache = null;
   let truncatedIds = new Set(); // id câu server phải cắt bớt cho vừa khe
-  // Đường bao ducking của bản lồng tiếng đang phát (uint8, mỗi mẫu là âm
-  // lượng track gốc tại mốc index/duckFps giây). Xem audio_pipeline.duck_envelope.
-  let duckEnv = null;
-  let duckFps = 0;
   let duckTimer = null;
   // Object URL sống theo vòng đời document chứ không theo phần tử: gỡ thẻ
   // <audio> KHÔNG giải phóng blob. Không thu hồi tay thì mỗi lần lồng tiếng,
@@ -168,12 +168,12 @@
       syncTimer = null;
     }
     stopDucking();
-    if (audioEl) {
-      audioEl.pause();
-      releaseObjectUrl(audioEl.src);
-      audioEl.remove();
-      audioEl = null;
+    for (const win of audioWindows) {
+      win.el.pause();
+      win.el.remove();
     }
+    audioWindows = [];
+    activeWindow = null;
     releaseAllObjectUrls();
     if (dockObserver) {
       dockObserver.disconnect();
@@ -562,20 +562,18 @@
       const port = chrome.runtime.connect({ name: "dub-job" });
       port.onMessage.addListener((msg) => {
         if (msg.type === "PROGRESS") setPanel(msg.pct, msg.note, true);
+        else if (msg.type === "WINDOW") applyWindow(msg);
         else if (msg.type === "DONE") {
-          const record = {
-            videoId,
-            voice: settings.voice,
-            planVersion: settings.planVersion,
-            ...msg,
-          };
+          // Cửa sổ đã phát dần rồi; DONE chỉ để lưu cache bản đầy đủ.
           DUB.cache
-            .put(
-              cacheKeyParts(videoId),
-              record,
-            )
-            .catch(() => {});
-          applyResult(record);
+            .put(cacheKeyParts(videoId), {
+              videoId,
+              voice: settings.voice,
+              planVersion: settings.planVersion,
+              ...msg,
+            })
+            .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
+          reportTruncatedSentences(msg);
         } else if (msg.type === "ERROR") {
           setPanel(0, "Lỗi: " + msg.message, true);
           currentState = "error";
@@ -593,36 +591,40 @@
     }
   }
 
+  /** Bản ghi đầy đủ (từ cache, hoặc lúc job xong): dựng lại mọi cửa sổ. */
   function applyResult(record) {
-    loadDuckEnvelope(record);
     reportTruncatedSentences(record);
     currentPlan = record.plan || null;
     currentTranslated = record.translated || null;
     currentSubtitles = record.subtitles;
 
-    const blob = base64ToBlob(
-      record.audioBase64,
-      record.audioMime || "audio/opus",
-    );
-    if (audioEl) {
-      audioEl.pause();
-      releaseObjectUrl(audioEl.src);
-      audioEl.remove();
-    }
-    audioEl = document.createElement("audio");
-    audioEl.id = "ldub-audio";
-    audioEl.preload = "auto";
-    audioEl.src = trackedObjectUrl(blob);
-    audioEl.style.display = "none";
-    document.body.appendChild(audioEl);
-    try {
-      audioEl.preservesPitch = true;
-      audioEl.mozPreservesPitch = true;
-      audioEl.webkitPreservesPitch = true;
-    } catch (e) {
-      /* trình duyệt cũ không hỗ trợ, chấp nhận đổi cao độ khi đổi tốc độ */
-    }
+    const windows = Array.isArray(record.windows) && record.windows.length
+      ? record.windows
+      // Bản cũ trong cache là một file duy nhất phủ cả video.
+      : [{
+        index: 0,
+        startSec: 0,
+        endSec: Infinity,
+        base64: record.audioBase64,
+        mime: record.audioMime,
+        duckEnvelope: record.duckEnvelope,
+      }];
+    for (const win of windows) addWindow(win);
+    finishSetup();
+  }
 
+  /** Một cửa sổ vừa tổng hợp xong đã về — phát được ngay nếu là cửa sổ đầu. */
+  function applyWindow(msg) {
+    currentPlan = msg.plan || currentPlan;
+    currentTranslated = msg.translated || currentTranslated;
+    currentSubtitles = msg.subtitles || currentSubtitles;
+    addWindow(msg.window);
+    if (audioWindows.length === 1) finishSetup();
+  }
+
+  /** Chuyển sang trạng thái "đang thuyết minh" khi đã có audio để phát. */
+  function finishSetup() {
+    if (currentState === "ready") return;
     currentState = "ready";
     setPanel(
       100,
@@ -639,6 +641,61 @@
     setMode("dubbed");
   }
 
+  function addWindow(win) {
+    const el = document.createElement("audio");
+    el.className = "ldub-audio";
+    el.preload = "auto";
+    el.src = trackedObjectUrl(base64ToBlob(win.base64, win.mime || "audio/opus"));
+    el.style.display = "none";
+    try {
+      el.preservesPitch = true;
+      el.mozPreservesPitch = true;
+      el.webkitPreservesPitch = true;
+    } catch (e) {
+      /* trình duyệt cũ không hỗ trợ, chấp nhận đổi cao độ khi đổi tốc độ */
+    }
+    document.body.appendChild(el);
+
+    audioWindows.push({
+      startSec: Number(win.startSec) || 0,
+      endSec: typeof win.endSec === "number" ? win.endSec : Infinity,
+      el,
+      duck: decodeDuckEnvelope(win.duckEnvelope),
+    });
+    audioWindows.sort((a, b) => a.startSec - b.startSec);
+  }
+
+  /** Cửa sổ phủ mốc thời gian này, hoặc null nếu chưa tổng hợp tới. */
+  function windowAt(seconds) {
+    return audioWindows.find((w) => seconds >= w.startSec && seconds < w.endSec) || null;
+  }
+
+  /** Đổi cửa sổ đang phát: dừng cái cũ, đặt đúng vị trí cho cái mới. */
+  function useWindow(next) {
+    if (next === activeWindow) return;
+    if (activeWindow) activeWindow.el.pause();
+    activeWindow = next;
+    if (!activeWindow) return;
+    activeWindow.el.playbackRate = video.playbackRate;
+    activeWindow.el.volume = mode === "original" ? 0 : (settings.dubVolume ?? 1);
+    syncActiveTime();
+    if (!video.paused && mode !== "original") activeWindow.el.play().catch(() => {});
+  }
+
+  function syncActiveTime() {
+    if (!activeWindow || !video) return;
+    try {
+      // Neo tuyệt đối: vị trí trong cửa sổ = thời điểm video trừ mốc bắt đầu.
+      activeWindow.el.currentTime = Math.max(0, video.currentTime - activeWindow.startSec);
+    } catch (e) {
+      /* audio chưa sẵn sàng nhận currentTime — vòng sync 250ms sẽ chỉnh lại */
+    }
+  }
+
+  function pauseAllWindows() {
+    for (const win of audioWindows) win.el.pause();
+  }
+
   // -------------------------------------------------------------------------
   // Ducking: hạ âm lượng video gốc theo đường bao thay vì mute hẳn, nên nhạc
   // nền và tiếng động vẫn nghe được dưới giọng thuyết minh. Chỉ đổi độ lợi
@@ -647,30 +704,31 @@
   // tainted CORS.
   // -------------------------------------------------------------------------
 
-  function loadDuckEnvelope(record) {
-    duckEnv = null;
-    duckFps = 0;
-    const env = record && record.duckEnvelope;
-    if (!env || !env.data || !env.fps) return; // bản cũ trong cache không có
-
+  function decodeDuckEnvelope(env) {
+    if (!env || !env.data || !env.fps) return null; // bản cũ trong cache không có
     try {
       const binary = atob(env.data);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      // Mảng rỗng vẫn "truthy": để lọt thì bedGainAt đọc phần tử -1, ra NaN,
-      // và video giữ nguyên âm lượng gốc thay vì được hạ xuống.
-      if (!bytes.length) return;
-      duckEnv = bytes;
-      duckFps = env.fps;
+      // Mảng rỗng vẫn "truthy": để lọt thì tra ra phần tử -1, thành NaN, và
+      // video giữ nguyên âm lượng gốc thay vì được hạ xuống.
+      return bytes.length ? { bytes, fps: env.fps } : null;
     } catch (e) {
       console.warn("[LDUB] đường bao ducking hỏng, quay lại mute video gốc:", e);
+      return null;
     }
   }
 
+  function hasDuckEnvelope() {
+    return audioWindows.some((win) => win.duck);
+  }
+
   function bedGainAt(seconds) {
-    if (!duckEnv || !duckFps) return 0;
-    const i = Math.min(duckEnv.length - 1, Math.max(0, Math.round(seconds * duckFps)));
-    return duckEnv[i] / 255;
+    const win = activeWindow || windowAt(seconds);
+    if (!win || !win.duck) return 0;
+    const index = Math.round((seconds - win.startSec) * win.duck.fps);
+    if (index < 0 || index >= win.duck.bytes.length) return 0;
+    return win.duck.bytes[index] / 255;
   }
 
   function applyBedVolume() {
@@ -741,19 +799,14 @@
   const SYNC_RATE_TRIM = 0.05;
 
   function hardResync() {
-    if (!video || !audioEl) return;
-    // audio có thể chưa sẵn sàng nhận currentTime ngay sau khi đổi src —
-    // bỏ qua lần này, vòng lặp sync 250ms sẽ chỉnh lại.
-    try {
-      audioEl.currentTime = video.currentTime;
-    } catch (e) {
-      /* thử lại ở tick sau */
-    }
+    if (!video || !audioWindows.length) return;
+    useWindow(windowAt(video.currentTime));
+    syncActiveTime();
   }
 
   function resumeIfPlaying() {
-    if (!video || !audioEl) return;
-    if (!video.paused && mode !== "original") audioEl.play().catch(() => {});
+    if (!video || !activeWindow) return;
+    if (!video.paused && mode !== "original") activeWindow.el.play().catch(() => {});
   }
 
   function startSync() {
@@ -766,53 +819,63 @@
 
     hardResync();
     applyVolumeForMode();
-    audioEl.playbackRate = video.playbackRate;
 
     on(video, "play", resumeIfPlaying);
-    on(video, "pause", () => audioEl.pause());
+    on(video, "pause", pauseAllWindows);
     on(video, "ratechange", () => {
-      audioEl.playbackRate = video.playbackRate;
+      if (activeWindow) activeWindow.el.playbackRate = video.playbackRate;
     });
 
     // Tua: DỪNG audio trước rồi mới nhảy, và chỉ phát lại ở 'seeked' khi video
     // đã chốt vị trí cuối. Để audio chạy tiếp trong lúc video còn đang seek thì
     // nó đọc trước hình rồi bị kéo giật ngược — đúng cảm giác "tua không mượt".
-    on(video, "seeking", () => audioEl.pause());
+    on(video, "seeking", pauseAllWindows);
     on(video, "seeked", () => {
       hardResync();
       resumeIfPlaying();
     });
 
     // Video buffer giữa chừng — im lặng chờ thay vì đọc tiếp một mình.
-    on(video, "waiting", () => audioEl.pause());
+    on(video, "waiting", pauseAllWindows);
     on(video, "playing", () => {
       hardResync();
       resumeIfPlaying();
     });
-    on(video, "ended", () => audioEl.pause());
+    on(video, "ended", pauseAllWindows);
 
     if (syncTimer) clearInterval(syncTimer);
     syncTimer = setInterval(tickSync, 250);
   }
 
   function tickSync() {
-    if (!video || !audioEl) return;
+    if (!video || !audioWindows.length) return;
     updateSubtitle();
     if (video.paused || video.seeking || mode === "original") return;
 
+    // Qua ranh giới cửa sổ (hoặc vừa tua tới đoạn đã tổng hợp xong) thì đổi
+    // thẻ audio trước, tick sau mới chỉnh trôi.
+    const wanted = windowAt(video.currentTime);
+    if (wanted !== activeWindow) {
+      useWindow(wanted);
+      return;
+    }
+    // Chưa có cửa sổ nào phủ mốc này: phần đó còn đang tổng hợp.
+    if (!activeWindow) return;
+
+    const el = activeWindow.el;
     // Lưới an toàn: 'waiting' đã pause audio nhưng 'playing' không phải lúc nào
     // cũng bắn (đổi tab, player tự phục hồi) — tự phát lại thay vì đứng im.
-    if (audioEl.paused) {
-      audioEl.play().catch(() => {});
+    if (el.paused) {
+      el.play().catch(() => {});
       return;
     }
 
-    const drift = video.currentTime - audioEl.currentTime; // > 0: audio đang chậm
+    const drift = (video.currentTime - activeWindow.startSec) - el.currentTime;
     const base = video.playbackRate;
 
     if (Math.abs(drift) > SYNC_HARD_SEC) {
-      hardResync();
-      audioEl.playbackRate = base;
+      syncActiveTime();
+      el.playbackRate = base;
     } else if (Math.abs(drift) > SYNC_DEADBAND_SEC) {
       // Kéo audio về đúng chỗ bằng cách đi nhanh/chậm hơn vài phần trăm thay vì
       // tua cứng — không cắt tiếng giữa câu.
@@ -820,9 +883,9 @@
         -SYNC_RATE_TRIM,
         Math.min(SYNC_RATE_TRIM, drift * 0.5),
       );
-      audioEl.playbackRate = base * (1 + trim);
-    } else if (audioEl.playbackRate !== base) {
-      audioEl.playbackRate = base;
+      el.playbackRate = base * (1 + trim);
+    } else if (el.playbackRate !== base) {
+      el.playbackRate = base;
     }
   }
 
@@ -990,10 +1053,11 @@
     mode = next;
     applyVolumeForMode();
     if (mode === "original") {
-      audioEl.pause();
-    } else if (!video.paused) {
-      audioEl.currentTime = video.currentTime;
-      audioEl.play().catch(() => {});
+      pauseAllWindows();
+    } else {
+      useWindow(windowAt(video.currentTime));
+      syncActiveTime();
+      if (!video.paused && activeWindow) activeWindow.el.play().catch(() => {});
     }
     updateSubtitle();
   }
@@ -1006,11 +1070,11 @@
     if (mode === "original") {
       stopDucking();
       resetVideoVolume();
-      audioEl.volume = 0;
+      for (const win of audioWindows) win.el.volume = 0;
       return;
     }
-    audioEl.volume = settings.dubVolume ?? 1;
-    if (duckEnv && (settings.bedVolume ?? 1) > 0) {
+    for (const win of audioWindows) win.el.volume = settings.dubVolume ?? 1;
+    if (hasDuckEnvelope() && (settings.bedVolume ?? 1) > 0) {
       applyBedVolume();
       startDucking();
     } else {
@@ -1027,23 +1091,36 @@
     setPanel(5, "Đang đổi giọng...", true);
     const videoId = videoIdFromUrl();
     const port = chrome.runtime.connect({ name: "dub-job" });
+    // Giọng mới thay hẳn audio cũ: bỏ mọi cửa sổ đang có rồi nhận cửa sổ mới
+    // theo đúng cơ chế phát dần như lần lồng tiếng đầu.
+    let replaced = false;
     port.onMessage.addListener((msg) => {
       if (msg.type === "PROGRESS") setPanel(msg.pct, msg.note, true);
-      else if (msg.type === "DONE") {
-        const record = {
-          videoId,
-          voice,
-          planVersion: settings.planVersion,
-          plan: msg.plan,
-          translated: msg.translated,
-          audioBase64: msg.audioBase64,
-          audioMime: msg.audioMime,
-          subtitles: msg.subtitles,
-        };
+      else if (msg.type === "WINDOW") {
+        if (!replaced) {
+          replaced = true;
+          pauseAllWindows();
+          for (const win of audioWindows) {
+            releaseObjectUrl(win.el.src);
+            win.el.remove();
+          }
+          audioWindows = [];
+          activeWindow = null;
+          currentState = "loading";
+        }
+        applyWindow(msg);
+      } else if (msg.type === "DONE") {
         DUB.cache
-          .put(cacheKeyParts(videoId, voice), record)
-          .catch(() => {});
-        applyResult(record);
+          .put(cacheKeyParts(videoId, voice), {
+            videoId,
+            voice,
+            planVersion: settings.planVersion,
+            plan: msg.plan,
+            translated: msg.translated,
+            subtitles: msg.subtitles,
+            windows: msg.windows,
+          })
+          .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
       } else if (msg.type === "ERROR") {
         setPanel(0, "Lỗi đổi giọng: " + msg.message, true);
       }

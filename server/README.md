@@ -81,13 +81,21 @@ GET  /api/health               -> loading | ready | error
 GET  /api/voices               -> available Kokoro voices
 POST /api/preview              -> WAV preview
 POST /api/synthesize           -> jobId
-GET  /api/job/{jobId}          -> queued | running | done | error
-GET  /audio/{jobId}.{ext}      -> final Opus/MP3 audio
+GET  /api/job/{jobId}          -> queued | running | done | error | cancelled
+DELETE /api/job/{jobId}        -> stop a running job
+GET  /audio/{jobId}/w{i}.{ext} -> one ~30s window of Opus/MP3 audio
 ```
 
 Requests are limited to six-hour videos, 5000 non-empty segments, and valid
 timestamps. Incomplete translation output is rejected instead of being
 rendered as placeholder speech.
+
+Audio comes back as ~30-second windows rather than one file the length of
+the video, and each window is published as soon as it is ready: the first
+one lands about four seconds into a job that takes half a minute, so
+playback starts while the rest is still being synthesised. Window edges
+always fall on a sentence start, so no sentence is split across two files,
+and each window's audio is exactly as long as the slice of video it covers.
 
 ## Checks
 
