@@ -11,7 +11,7 @@ const DEFAULT_SETTINGS = {
 
   viSyllablesPerSec: 3.8,
 
-  planVersion: 'gemini-v2',
+  planVersion: 'gemini-v3',
 };
 
 const GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
