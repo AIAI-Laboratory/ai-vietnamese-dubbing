@@ -608,7 +608,7 @@
 
       const port = chrome.runtime.connect({ name: "dub-job" });
       port.onMessage.addListener((msg) => {
-        if (msg.type === "PROGRESS") setPanel(msg.pct, msg.note, true);
+        if (msg.type === "PROGRESS") reportProgress(msg);
         else if (msg.type === "WINDOW") {
           try {
             applyWindow(msg);
@@ -644,6 +644,22 @@
     } catch (e) {
       setPanel(0, "Lỗi: " + (e && e.message ? e.message : String(e)), true);
       currentState = "error";
+    }
+  }
+
+  /**
+   * Tiến độ job. Khi đã phát được rồi thì KHÔNG mở lại bảng: phần còn lại
+   * vẫn đang tổng hợp trong nền, nhưng người xem đang nghe rồi nên bảng tiến
+   * độ che video chẳng để làm gì — trước đây nó bật lại mỗi 700ms và nằm lì
+   * ở đó tới hết job.
+   */
+  function reportProgress(msg) {
+    const playing = currentState === "ready" && audioWindows.length > 0;
+    setPanel(msg.pct, msg.note, !playing);
+    if (playing && dubBtn) {
+      dubBtn.title = msg.pct >= 99
+        ? "Thuyết minh tiếng Việt"
+        : `Đang tổng hợp phần còn lại — ${Math.round(msg.pct)}%`;
     }
   }
 
@@ -1162,7 +1178,7 @@
     // theo đúng cơ chế phát dần như lần lồng tiếng đầu.
     let replaced = false;
     port.onMessage.addListener((msg) => {
-      if (msg.type === "PROGRESS") setPanel(msg.pct, msg.note, true);
+      if (msg.type === "PROGRESS") reportProgress(msg);
       else if (msg.type === "WINDOW") {
         if (!replaced) {
           replaced = true;

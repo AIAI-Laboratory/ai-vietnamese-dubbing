@@ -162,6 +162,12 @@ function loadContentScript() {
   return { context, video, ports, created, body };
 }
 
+/** Bảng tiến độ có đang hiện không. */
+function panelVisible(harness) {
+  const overlay = harness.created.find((el) => el.className === 'ldub-overlay');
+  return overlay?.__found?.get('.ldub-panel')?.hidden === false;
+}
+
 /** Chữ đang hiện trong panel nổi. */
 function panelText(harness) {
   const overlay = harness.created.find((el) => el.className === 'ldub-overlay');
@@ -276,4 +282,27 @@ test('job lỗi hiện thông báo thay vì im lặng', async () => {
   await new Promise((r) => setTimeout(r, 10));
 
   assert.match(panelText(harness), /server tắt/);
+});
+
+
+test('tiến độ của phần còn lại không mở lại bảng khi đã phát được', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+
+  // Đang tổng hợp: bảng phải hiện.
+  port.__deliver({ type: 'PROGRESS', pct: 60, note: 'Đang tổng hợp giọng đọc — 10/50 câu' });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(panelVisible(harness), true, 'lúc chưa phát được thì bảng phải hiện');
+
+  // Cửa sổ đầu về -> bắt đầu phát, bảng đóng lại.
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(panelVisible(harness), false, 'phát được rồi thì bảng phải đóng');
+
+  // Các cửa sổ sau vẫn đang tổng hợp — tiến độ KHÔNG được bật lại bảng.
+  for (const pct of [70, 80, 95]) {
+    port.__deliver({ type: 'PROGRESS', pct, note: `Đang tổng hợp giọng đọc — ${pct}%` });
+  }
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(panelVisible(harness), false, 'tiến độ phần còn lại không được che video');
 });
