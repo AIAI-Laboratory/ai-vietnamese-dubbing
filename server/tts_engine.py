@@ -16,24 +16,57 @@ SAMPLE_RATE = 24000
 SPEED_MAX = 1.15
 MODEL_REVISION = "9f210d622209fcc216fe2ac6159fed2ff381cb8a"
 
+_LETTER_NAMES = {
+    "A": "ây", "B": "bi", "C": "xi", "D": "đi", "E": "ê", "F": "ép", "G": "giê",
+    "H": "hát", "I": "ai", "J": "giây", "K": "kê", "L": "eo", "M": "em",
+    "N": "en", "O": "ô", "P": "pi", "Q": "kiu", "R": "e rờ", "S": "ét",
+    "T": "ti", "U": "iu", "V": "vi", "W": "đắp liu", "X": "ích", "Y": "quai",
+    "Z": "dét",
+}
+
 _SPOKEN_TERMS = {
-    "HTTPS": "hát ti ti pi ét",
-    "HTTP": "hát ti ti pi",
-    "HTML": "hát ti em eo",
     "JSON": "giây son",
     "SQL": "ét kiu eo",
-    "URL": "iu a eo",
-    "CPU": "xi pi iu",
-    "GPU": "gi pi iu",
-    "API": "ây pi ai",
-    "CSS": "xi ét ét",
-    "UI": "iu ai",
-    "AI": "ây ai",
 }
+
+_SPELLED_ACRONYMS = {
+    "AI", "API", "AWS", "CDN", "CLI", "CNN", "CPU", "CSS", "CSV", "CV", "DB",
+    "DL", "DNS", "ETL", "GPU", "GUI", "HDD", "HTML", "HTTP", "HTTPS", "IDE",
+    "IP", "JPG", "JWT", "LLM", "LSTM", "ML", "NLP", "ORM", "OS", "PDF", "PNG",
+    "RNN", "SDK", "SSD", "SSH", "SSL", "SVG", "TCP", "TLS", "UDP", "UI", "URL",
+    "USB", "UUID", "UX", "VM", "VPN", "XML", "YAML",
+}
+
 _SPOKEN_TERM_RE = re.compile(
     r"\b(" + "|".join(map(re.escape, _SPOKEN_TERMS)) + r")\b",
     re.IGNORECASE,
 )
+_ACRONYM_RE = re.compile(r"\b[A-Z]{2,6}\b")
+_VOWELS = set("AEIOU")
+
+_IDENTIFIER_DOT = re.compile(r"(?<=[A-Za-z])\.(?=[A-Za-z])")
+_BRACKETS = re.compile(r"[()\[\]{}]")
+
+
+def spell_acronym(word: str) -> str:
+    """Đọc từng chữ cái theo tên chữ cái tiếng Anh, viết bằng chữ Việt."""
+
+    return " ".join(_LETTER_NAMES.get(letter, letter) for letter in word)
+
+
+def _spell_if_acronym(match: re.Match) -> str:
+    """Viết tắt thì đánh vần; từ tiếng Anh viết hoa (SAVE, NOTE) thì để nguyên.
+
+    Danh sách _SPELLED_ACRONYMS là phần chắc chắn; ngoài danh sách chỉ đánh vần
+    chuỗi không có nguyên âm, vì chuỗi đó không đọc liền thành từ được.
+    """
+
+    word = match.group(0)
+    if word in _SPELLED_ACRONYMS or not (set(word) & _VOWELS):
+        return spell_acronym(word)
+    return word
+
+
 _VI_MARKS = re.compile(
     "[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩị"
     "òóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]",
@@ -137,9 +170,12 @@ def normalize_for_speech(text: str) -> str:
     """Chuẩn hoá câu trước khi đưa vào G2P: acronym và chữ số."""
 
     normalized = unicodedata.normalize("NFC", text).strip()
+    normalized = _BRACKETS.sub(" ", normalized.replace("_", " "))
+    normalized = _IDENTIFIER_DOT.sub(" ", normalized)
     normalized = _SPOKEN_TERM_RE.sub(
         lambda match: _SPOKEN_TERMS[match.group(0).upper()], normalized
     )
+    normalized = _ACRONYM_RE.sub(_spell_if_acronym, normalized)
     return normalize_numbers(normalized)
 
 

@@ -77,3 +77,49 @@ class TestEnglishInVietnamese(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AcronymReadingTest(unittest.TestCase):
+    """Viết tắt lạ từng bị đọc bằng tên chữ cái tiếng Anh, hoặc đọc liền như một từ."""
+
+    def spoken(self, text):
+        import tts_engine
+
+        return tts_engine.normalize_for_speech(text)
+
+    def test_spells_known_technical_acronyms(self):
+        cases = {
+            "AWS": "ây đắp liu ét",
+            "SDK": "ét đi kê",
+            "CNN": "xi en en",
+            "ETL": "ê ti eo",
+            "UX": "iu ích",
+            "VPN": "vi pi en",
+            "HTML": "hát ti em eo",
+            "CPU": "xi pi iu",
+            "API": "ây pi ai",
+        }
+        for acronym, expected in cases.items():
+            with self.subTest(acronym=acronym):
+                self.assertEqual(self.spoken(acronym), expected)
+
+    def test_spells_unknown_acronyms_without_vowels(self):
+        self.assertEqual(self.spoken("XYZ"), "ích quai dét")
+
+    def test_leaves_capitalised_english_words_alone(self):
+        for word in ("SAVE", "NOTE", "RAM", "GAN"):
+            with self.subTest(word=word):
+                self.assertEqual(self.spoken(word), word)
+
+    def test_spelled_acronyms_stay_inside_the_vietnamese_sounds(self):
+        for acronym in ("AWS", "SDK", "RNN", "GPU", "URL", "SSH", "LSTM", "PNG"):
+            with self.subTest(acronym=acronym):
+                self.assertLessEqual(sounds(self.spoken(acronym)), VIETNAMESE_SOUNDS)
+
+    def test_identifiers_are_split_into_words(self):
+        self.assertEqual(self.spoken("loss_function"), "loss function")
+        self.assertEqual(self.spoken("np.array"), "np array")
+        self.assertEqual(self.spoken("gọi fit()"), "gọi fit")
+
+    def test_decimal_numbers_survive_identifier_splitting(self):
+        self.assertEqual(self.spoken("3.11"), "ba phẩy một một")
