@@ -429,7 +429,24 @@ def print_server_info(host: str, port: int) -> None:
         )
 
 
+def require_ffmpeg() -> None:
+    """Chốt ffmpeg ngay lúc khởi động.
+
+    Không có bước này thì thiếu ffmpeg chỉ lộ ra ở cuối job — sau khi đã tổng
+    hợp xong hàng trăm câu và đã trả tiền cho bước dịch.
+    """
+
+    if shutil.which("ffmpeg"):
+        return
+    sys.exit(
+        "LỖI: không tìm thấy ffmpeg trong PATH. Server cần nó để nén audio vừa "
+        "khe và xuất Opus/MP3. Cài: winget install Gyan.FFmpeg (Windows), "
+        "apt install ffmpeg (Debian/Ubuntu), brew install ffmpeg (macOS)."
+    )
+
+
 def main() -> None:
+    require_ffmpeg()
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 18765)))
     ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))

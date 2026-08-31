@@ -72,7 +72,11 @@ def load_voicepack(path: str | Path) -> np.ndarray:
     """
 
     with zipfile.ZipFile(path) as archive:
-        pickle_name = next(n for n in archive.namelist() if n.endswith("data.pkl"))
+        pickle_name = next(
+            (n for n in archive.namelist() if n.endswith("data.pkl")), ""
+        )
+        if not pickle_name:
+            raise ValueError(f"{path} không phải file voicepack torch (thiếu data.pkl)")
         prefix = pickle_name[: -len("data.pkl")]
 
         def rebuild(storage, offset, size, stride, *_rest):
@@ -110,7 +114,7 @@ def load_voicepack(path: str | Path) -> np.ndarray:
 
 
 def split_text(text: str) -> list[str]:
-    """Cắt theo dấu kết câu; mỗi mảnh phải vừa cửa sổ phoneme của model."""
+    """Cắt theo dấu kết câu. Xem thêm fit_to_context cho mảnh vẫn quá dài."""
 
     normalized = re.sub(r"\s+", " ", text.strip())
     if not normalized:
@@ -137,6 +141,56 @@ def phonemize(text: str) -> str:
     from vig2p import phonemize_text
 
     return phonemize_text(text)
+
+
+def fit_to_context(chunk: str, context_length: int) -> list[str]:
+    """Cắt tiếp một mảnh cho tới khi vừa cửa sổ phoneme của model.
+
+    Model chỉ nhận context_length phoneme (512), và split_text chỉ cắt ở dấu
+    kết câu — phụ đề tự động của YouTube thường KHÔNG có dấu câu nào, nên một
+    "câu" có thể dài cả nghìn ký tự. Trước đây ca đó ném ValueError và giết
+    nguyên job, vứt toàn bộ tiền đã trả cho bước dịch. Giờ cắt tiếp ở dấu phẩy,
+    rồi ở khoảng trắng, và ghép lại bằng crossfade như các câu khác.
+    """
+
+    limit = context_length - 2  # chừa hai token bao ở hai đầu
+    if len(phonemize(chunk)) <= limit:
+        return [chunk]
+
+    for pattern in (r'(?<=[,;:])\s+', r'\s+'):
+        parts = [p for p in re.split(pattern, chunk) if p.strip()]
+        if len(parts) < 2:
+            continue
+        pieces: list[str] = []
+        current = ''
+        for part in parts:
+            candidate = f'{current} {part}'.strip()
+            if current and len(phonemize(candidate)) > limit:
+                pieces.append(current)
+                current = part
+            else:
+                current = candidate
+        if current:
+            pieces.append(current)
+        if all(len(phonemize(p)) <= limit for p in pieces):
+            return pieces
+
+    # Một "từ" đơn dài hơn cả cửa sổ (URL, chuỗi rác trong phụ đề): cắt thô
+    # theo ký tự. Số phoneme không tỉ lệ đều với số ký tự nên phải dò thật
+    # đoạn dài nhất còn vừa, thay vì ước theo tỉ lệ trung bình.
+    pieces = []
+    rest = chunk
+    while rest:
+        lo, hi, best = 1, len(rest), 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if len(phonemize(rest[:mid])) <= limit:
+                best, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        pieces.append(rest[:best])
+        rest = rest[best:]
+    return pieces
 
 
 def phonemes_to_input_ids(phonemes: str, vocab: dict[str, int], context_length: int) -> np.ndarray:
@@ -241,18 +295,19 @@ class KokoroOnnx:
         vocab = self.config["vocab"]
 
         audio_chunks: list[np.ndarray] = []
-        for chunk in split_text(text):
-            phonemes = phonemize(chunk)
-            if not phonemes:
-                continue
-            waveform, _duration = self.session.run(
-                None,
-                {
-                    "input_ids": phonemes_to_input_ids(phonemes, vocab, self.context_length),
-                    "ref_s": select_voice_style(voicepack, len(phonemes)),
-                    "speed": speed_value,
-                },
-            )
-            audio_chunks.append(np.asarray(waveform, dtype=np.float32).reshape(-1))
+        for sentence in split_text(text):
+            for chunk in fit_to_context(sentence, self.context_length):
+                phonemes = phonemize(chunk)
+                if not phonemes:
+                    continue
+                waveform, _duration = self.session.run(
+                    None,
+                    {
+                        "input_ids": phonemes_to_input_ids(phonemes, vocab, self.context_length),
+                        "ref_s": select_voice_style(voicepack, len(phonemes)),
+                        "speed": speed_value,
+                    },
+                )
+                audio_chunks.append(np.asarray(waveform, dtype=np.float32).reshape(-1))
 
         return merge_audio_chunks(audio_chunks, round(SAMPLE_RATE * int(crossfade_ms) / 1000))

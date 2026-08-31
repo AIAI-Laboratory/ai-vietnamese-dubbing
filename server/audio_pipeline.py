@@ -56,11 +56,13 @@ def _one_pole(tau_sec: float, fps: int) -> float:
     return math.exp(-1.0 / max(1e-6, tau_sec * fps))
 
 
-def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict:
+def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict | None:
     """Độ lợi cho track gốc theo thời gian, lấy từ track thuyết minh.
 
     Trả về {"fps", "data"} với data là chuỗi base64 của mảng uint8, mỗi byte
-    là âm lượng track gốc (0-255 tương ứng 0.0-1.0) tại mốc index/fps giây.
+    là âm lượng track gốc (0-255 tương ứng 0.0-1.0) tại mốc index/fps giây;
+    None khi track ngắn hơn một khung, để client biết là không có đường bao
+    thay vì nhận một mảng rỗng rồi tính ra âm lượng NaN.
     """
 
     import numpy as np
@@ -73,7 +75,7 @@ def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict:
     hop = max(1, sample_rate // fps)
     frames = len(samples) // hop
     if frames == 0:
-        return {"fps": fps, "data": ""}
+        return None
 
     block = samples[: frames * hop].reshape(frames, hop)
     rms = np.sqrt(np.mean(np.square(block), axis=1))

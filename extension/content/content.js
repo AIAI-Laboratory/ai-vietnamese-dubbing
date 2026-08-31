@@ -606,10 +606,14 @@
     duckFps = 0;
     const env = record && record.duckEnvelope;
     if (!env || !env.data || !env.fps) return; // bản cũ trong cache không có
+
     try {
       const binary = atob(env.data);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      // Mảng rỗng vẫn "truthy": để lọt thì bedGainAt đọc phần tử -1, ra NaN,
+      // và video giữ nguyên âm lượng gốc thay vì được hạ xuống.
+      if (!bytes.length) return;
       duckEnv = bytes;
       duckFps = env.fps;
     } catch (e) {
