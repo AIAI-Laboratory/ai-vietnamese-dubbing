@@ -73,6 +73,7 @@
   let activeWindow = null;
   let subtitleEl = null;
   let controlsEl = null;
+  let fullscreenBound = false;
   let currentState = "idle"; // idle | loading | ready | error
   let currentPlan = null;
   let currentTranslated = null;
@@ -203,6 +204,17 @@
       overlay.remove();
       overlay = null;
     }
+    // Phụ đề và bảng điều khiển gắn thẳng vào body chứ không nằm trong
+    // overlay, nên trước đây chúng ở lại màn hình sau khi rời trang video —
+    // thấy rõ khi bấm nhanh sang bài tiếp theo.
+    if (subtitleEl) {
+      subtitleEl.remove();
+      subtitleEl = null;
+    }
+    if (controlsEl) {
+      controlsEl.remove();
+      controlsEl = null;
+    }
     if (video) resetVideoVolume();
     currentState = "idle";
     currentPlan = currentTranslated = currentSubtitles = null;
@@ -299,6 +311,33 @@
   // của video, KHÔNG chèn vào cây DOM của Coursera để tránh phá layout player.
   // -------------------------------------------------------------------------
 
+  /**
+   * Nơi gắn các phần tử nổi của mình.
+   *
+   * Khi trình duyệt vào toàn màn hình, nó CHỈ vẽ phần tử fullscreen và con
+   * cháu của nó — mọi thứ khác trong body biến mất, kể cả phụ đề của mình.
+   * Nên phải chuyển chúng vào bên trong phần tử đang fullscreen.
+   */
+  function floatingHost() {
+    return document.fullscreenElement || document.webkitFullscreenElement || document.body;
+  }
+
+  /** Đưa phụ đề, bảng điều khiển và nút nổi về đúng nơi cần gắn. */
+  function remountFloating() {
+    const host = floatingHost();
+    // controlsEl nằm trong overlay nên đi theo overlay, không chuyển riêng.
+    for (const el of [overlay, subtitleEl]) {
+      if (el && el.parentElement !== host) host.appendChild(el);
+    }
+    // Nút đã cắm vào thanh điều khiển của trang thì để yên: thanh đó nằm sẵn
+    // trong phần tử fullscreen rồi.
+    if (dubBtn && !dubBtn.classList.contains("ldub-btn-docked")
+        && dubBtn.parentElement !== host) {
+      host.appendChild(dubBtn);
+    }
+    positionOverlay();
+  }
+
   function injectOverlay() {
     overlay = document.createElement("div");
     overlay.className = "ldub-overlay";
@@ -318,6 +357,12 @@
     dubBtn.innerHTML = `${ICON_MIC}<span class="ldub-btn-text">Thuyết minh tiếng Việt</span>`;
     dubBtn.addEventListener("click", onDubClick);
     document.body.appendChild(dubBtn); // vị trí nổi mặc định/dự phòng — xem tryDockToControlBar()
+
+    if (!fullscreenBound) {
+      fullscreenBound = true;
+      document.addEventListener("fullscreenchange", remountFloating);
+      document.addEventListener("webkitfullscreenchange", remountFloating);
+    }
 
     subtitleEl = document.createElement("div");
     subtitleEl.className = "ldub-subtitle";

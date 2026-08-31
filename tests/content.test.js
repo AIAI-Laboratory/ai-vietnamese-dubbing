@@ -48,8 +48,23 @@ function makeElement(tag = 'div') {
       remove(...names) { names.forEach((n) => this._set.delete(n)); },
       contains(name) { return this._set.has(name); },
     },
-    appendChild(child) { children.push(child); return child; },
-    remove() { el.removed = true; },
+    appendChild(child) {
+      if (child.parentElement) {
+        const at = child.parentElement.children.indexOf(child);
+        if (at >= 0) child.parentElement.children.splice(at, 1);
+      }
+      children.push(child);
+      child.parentElement = el;
+      return child;
+    },
+    remove() {
+      el.removed = true;
+      if (el.parentElement) {
+        const at = el.parentElement.children.indexOf(el);
+        if (at >= 0) el.parentElement.children.splice(at, 1);
+      }
+      el.parentElement = null;
+    },
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
     getBoundingClientRect() { return { top: 0, left: 0, right: 800, bottom: 450, width: 800, height: 450 }; },
@@ -122,13 +137,16 @@ function loadContentScript() {
   context.window = context;
   context.addEventListener = () => {};
   context.removeEventListener = () => {};
+  const documentListeners = {};
   context.document = {
     body,
     documentElement: makeElement('html'),
+    fullscreenElement: null,
     createElement(tag) { const el = makeElement(tag); created.push(el); return el; },
     querySelector() { return null; },
     querySelectorAll(selector) { return selector === 'video' ? [video] : []; },
-    addEventListener() {},
+    addEventListener(type, fn) { (documentListeners[type] = documentListeners[type] || []).push(fn); },
+    __fire(type) { (documentListeners[type] || []).forEach((fn) => fn({})); },
   };
 
   const ports = [];
@@ -381,4 +399,56 @@ test('bản ghi cache rỗng audio không được coi là đã xong', async () 
 
   assert.strictEqual(statusOf(harness), 'working', 'phải chạy job thật chứ không dùng cache rỗng');
   assert.ok(port.sent.some((m) => m.type === 'START'), 'phải gửi START để dịch lại');
+});
+
+
+/** Một phần tử rời để đóng vai "phần tử đang fullscreen". */
+function makeElementForTest() {
+  return makeElement('div');
+}
+
+/** Phần tử phụ đề nổi (gắn thẳng vào body, không nằm trong overlay). */
+function subtitleBox(harness) {
+  return harness.created.find((el) => /ldub-subtitle/.test(el.className));
+}
+
+test('rời trang video thì phụ đề biến mất cùng', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  await new Promise((r) => setTimeout(r, 10));
+
+  const subtitle = subtitleBox(harness);
+  assert.ok(subtitle, 'phải có hộp phụ đề');
+  assert.strictEqual(subtitle.parentElement, harness.body, 'phụ đề gắn thẳng vào body');
+
+  // Bấm nhanh sang bài kế: URL đổi -> vòng điều hướng dọn dẹp.
+  harness.context.location.pathname = '/learn/abc/quiz/KHAC';
+  tick(harness.context);
+  await new Promise((r) => setTimeout(r, 5));
+
+  assert.strictEqual(subtitle.parentElement, null, 'phụ đề phải bị gỡ khỏi trang');
+  assert.ok(subtitle.removed, 'và bị remove() thật sự');
+});
+
+test('vào toàn màn hình thì phụ đề chuyển vào trong phần tử fullscreen', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  await new Promise((r) => setTimeout(r, 10));
+
+  const subtitle = subtitleBox(harness);
+  assert.strictEqual(subtitle.parentElement, harness.body);
+
+  // Trình duyệt chỉ vẽ phần tử fullscreen và con cháu của nó.
+  const player = makeElementForTest();
+  harness.context.document.fullscreenElement = player;
+  harness.context.document.__fire('fullscreenchange');
+
+  assert.strictEqual(subtitle.parentElement, player, 'phụ đề phải nằm trong phần tử fullscreen');
+
+  // Thoát toàn màn hình thì trả về body.
+  harness.context.document.fullscreenElement = null;
+  harness.context.document.__fire('fullscreenchange');
+  assert.strictEqual(subtitle.parentElement, harness.body);
 });
