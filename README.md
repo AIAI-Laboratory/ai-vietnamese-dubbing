@@ -104,8 +104,8 @@ JavaScript syntax, Python compilation, and the unit tests are checked
 locally before release:
 
   ```bash
-  node --test tests/*.test.js
-  cd server && python -m compileall -q .
+  node --test tests/*.test.js                       # 18 test
+  server/.venv/Scripts/python -m unittest discover -s tests -t tests   # 44 test
   ```
 - Kokoro model loading and CPU synthesis can be smoke-tested with the
   Swagger preview route at `POST /api/preview`.

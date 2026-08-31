@@ -101,3 +101,31 @@ test('glossary rỗng ruột bị coi là không dùng được', () => {
     assert.strictEqual(plan.isUsableTerminology(bad), false, `phải loại: ${JSON.stringify(bad)}`);
   }
 });
+
+test('câu thiếu bản dịch bị đánh dấu THIẾU chứ không lọt qua', () => {
+  const built = plan.buildPlan([cue(0, 2, 'One.'), cue(3, 5, 'Two.')], 8, {
+    viSyllablesPerSec: 3.8,
+  });
+  const verified = plan.verifyPlan(built, [{ id: 1, vi: 'một hai' }], 3.8);
+  assert.strictEqual(verified.rows[1].status, 'THIẾU');
+  assert.strictEqual(verified.rows[1].vi, null);
+  assert.strictEqual(verified.overflowCount, 1);
+});
+
+test('chunkSegments chia đủ và không mất câu nào', () => {
+  const segments = Array.from({ length: 57 }, (_, i) => ({ id: i + 1 }));
+  const chunks = plan.chunkSegments(segments, 25);
+  // Mảng sinh trong vm mang prototype của realm khác nên so qua JSON.
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(chunks.map((c) => c.length))), [25, 25, 7]);
+  assert.strictEqual(chunks.flat().length, segments.length);
+  // Không trùng id giữa các chunk.
+  assert.strictEqual(new Set(chunks.flat().map((s) => s.id)).size, segments.length);
+});
+
+test('glossary hợp lệ đi qua, mọi biến thể rỗng bị chặn', () => {
+  assert.strictEqual(
+    plan.isUsableTerminology({ subject: 'X', terms: [{ source: 'a', target: 'a' }] }),
+    true,
+  );
+  assert.strictEqual(plan.isUsableTerminology({ subject: 'X', terms: [] }), false);
+});
