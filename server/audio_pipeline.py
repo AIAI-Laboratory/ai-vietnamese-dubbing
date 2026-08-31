@@ -57,6 +57,12 @@ DUCK_SPEECH_RMS = 0.02
 DUCK_ATTACK_SEC = 0.08
 DUCK_RELEASE_SEC = 0.40
 
+# Số frame đọc/ghi mỗi lượt khi xử lý timeline. Toàn bộ đường ống audio làm
+# việc theo khối cỡ này thay vì nạp cả bài vào RAM: bài 2 tiếng là 345 MB
+# PCM, và bản trước đây giữ tới hai bản sao cùng lúc ở cả khâu ghép lẫn khâu
+# tính đường bao.
+STREAM_CHUNK_FRAMES = 1 << 16  # 65536 frame ~ 2.7 giây, 128 KB
+
 
 def _one_pole(tau_sec: float, fps: int) -> float:
     return math.exp(-1.0 / max(1e-6, tau_sec * fps))
@@ -69,35 +75,34 @@ def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict | None:
     là âm lượng track gốc (0-255 tương ứng 0.0-1.0) tại mốc index/fps giây;
     None khi track ngắn hơn một khung, để client biết là không có đường bao
     thay vì nhận một mảng rỗng rồi tính ra âm lượng NaN.
+
+    Đọc từng khung một và cộng bình phương trên int64 (chính xác tuyệt đối,
+    không tràn với int16) nên bộ nhớ không phụ thuộc độ dài video.
     """
 
     import numpy as np
 
-    with wave.open(str(wav_path), "rb") as f:
-        sample_rate = f.getframerate()
-        pcm = f.readframes(f.getnframes())
-
-    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-    hop = max(1, sample_rate // fps)
-    frames = len(samples) // hop
-    if frames == 0:
-        return None
-
-    block = samples[: frames * hop].reshape(frames, hop)
-    rms = np.sqrt(np.mean(np.square(block), axis=1))
-    targets = np.where(rms > DUCK_SPEECH_RMS, DUCK_SPEAKING, DUCK_SILENT)
-
     attack = _one_pole(DUCK_ATTACK_SEC, fps)
     release = _one_pole(DUCK_RELEASE_SEC, fps)
-    gains = np.empty(frames, dtype=np.float32)
     gain = float(DUCK_SILENT)
-    for i, target in enumerate(targets):
-        coef = attack if target < gain else release
-        gain = float(target) + (gain - float(target)) * coef
-        gains[i] = gain
+    quantized = bytearray()
 
-    quantized = np.clip(np.rint(gains * 255), 0, 255).astype(np.uint8)
-    return {"fps": fps, "data": base64.b64encode(quantized.tobytes()).decode("ascii")}
+    with wave.open(str(wav_path), "rb") as handle:
+        hop = max(1, handle.getframerate() // fps)
+        while True:
+            raw = handle.readframes(hop)
+            if len(raw) < hop * 2:
+                break  # khung cuối không đủ dữ liệu thì bỏ, như bản cũ
+            block = np.frombuffer(raw, dtype="<i2").astype(np.int64)
+            rms = math.sqrt(float(block @ block) / len(block)) / 32768.0
+            target = DUCK_SPEAKING if rms > DUCK_SPEECH_RMS else DUCK_SILENT
+            coefficient = attack if target < gain else release
+            gain = target + (gain - target) * coefficient
+            quantized.append(min(255, max(0, round(gain * 255))))
+
+    if not quantized:
+        return None
+    return {"fps": fps, "data": base64.b64encode(bytes(quantized)).decode("ascii")}
 
 
 def available_slots(segments: list[dict], duration_sec: float) -> dict[int, float]:
@@ -194,22 +199,68 @@ def stretch_to_fit(src_wav: Path, dst_wav: Path, natural_sec: float, slot_sec: f
     }
 
 
+def _write_silence(out: wave.Wave_write, frames: int) -> None:
+    silence = b"\x00\x00" * min(frames, STREAM_CHUNK_FRAMES)
+    while frames > 0:
+        take = min(frames, STREAM_CHUNK_FRAMES)
+        out.writeframes(silence[: take * 2])
+        frames -= take
+
+
+def _copy_frames(src: Path, out: wave.Wave_write, skip: int, budget: int) -> int:
+    """Chép tối đa `budget` frame từ src sang out, bỏ `skip` frame đầu."""
+
+    written = 0
+    with wave.open(str(src), "rb") as handle:
+        if handle.getframerate() != SAMPLE_RATE:
+            raise ValueError(f"sample rate lệch: {handle.getframerate()} != {SAMPLE_RATE}")
+        if skip > 0:
+            handle.setpos(min(skip, handle.getnframes()))
+        while written < budget:
+            raw = handle.readframes(min(STREAM_CHUNK_FRAMES, budget - written))
+            if not raw:
+                break
+            out.writeframes(raw)
+            written += len(raw) // 2
+    return written
+
+
 def assemble_timeline(segment_wavs: list[tuple[dict, Path]], duration_sec: float, out_wav: Path) -> None:
-    """Đặt từng câu (đã cắt vừa khe) vào một track im lặng dài bằng video —
-    ghi đè (slice) thay vì cộng dồn từng sample, các khe không chồng lấn."""
-    total_bytes = max(2, int(duration_sec * SAMPLE_RATE) * 2)
-    master = bytearray(total_bytes)  # PCM 16-bit mono, khởi tạo = im lặng
+    """Ghép các câu vào một track dài bằng video, ghi thẳng ra file.
 
-    for seg, wav_path in segment_wavs:
-        pcm, sr = _read_pcm_mono16(wav_path)
-        assert sr == SAMPLE_RATE, f"sample rate lệch: {sr} != {SAMPLE_RATE}"
-        pos = int(seg["start"] * SAMPLE_RATE) * 2
-        if pos < 0 or pos >= total_bytes:
-            continue
-        end = min(pos + len(pcm), total_bytes)
-        master[pos:end] = pcm[: end - pos]
+    Các câu được xếp theo mốc bắt đầu; khoảng trống giữa chúng là im lặng, và
+    câu nào lấn sang mốc của câu kế thì bị cắt ở đó — cùng kết quả với bản cũ
+    (ghi đè lên mảng master) cho mọi timeline không chồng lấn, nhưng không
+    bao giờ giữ quá một khối 128 KB trong RAM.
+    """
 
-    _write_wav(out_wav, bytes(master), SAMPLE_RATE)
+    total_frames = max(1, int(duration_sec * SAMPLE_RATE))
+    ordered = sorted(segment_wavs, key=lambda item: item[0]["start"])
+
+    with wave.open(str(out_wav), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(SAMPLE_RATE)
+
+        cursor = 0
+        for index, (segment, wav_path) in enumerate(ordered):
+            start = int(segment["start"] * SAMPLE_RATE)
+            if start >= total_frames:
+                continue
+            if start > cursor:
+                _write_silence(out, start - cursor)
+                cursor = start
+            limit = total_frames
+            if index + 1 < len(ordered):
+                next_start = int(ordered[index + 1][0]["start"] * SAMPLE_RATE)
+                limit = min(limit, max(cursor, next_start))
+            budget = limit - cursor
+            if budget <= 0:
+                continue
+            cursor += _copy_frames(wav_path, out, skip=cursor - start, budget=budget)
+
+        if cursor < total_frames:
+            _write_silence(out, total_frames - cursor)
 
 
 def export_final(wav_path: Path, out_path_no_ext: Path) -> tuple[str, Path]:
