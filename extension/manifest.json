@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Local AI Vietnamese Dubbing",
-  "version": "0.1.0",
-  "description": "Thuyết minh tiếng Việt tự động cho video Coursera và YouTube. Dịch qua Gemini API chính thức, tổng hợp giọng nói qua server local trên máy bạn.",
+  "version": "0.4.0",
+  "description": "Thuyết minh tiếng Việt cho bài giảng Coursera và video YouTube. Dịch qua Gemini API, tổng hợp giọng nói ngay trên máy bạn.",
   "permissions": [
     "storage",
     "activeTab",
@@ -53,5 +53,7 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "options_page": "options/options.html"
+  "options_page": "options/options.html",
+  "author": "Hà Trọng Nguyên (AIAI Lab)",
+  "homepage_url": "https://github.com/AIAI-Laboratory/AI-Vietnamese-Dubbing"
 }
