@@ -35,6 +35,13 @@ const DEFAULT_SETTINGS = {
 const GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
+// Phiên bản giao thức giữa content script và service worker. Tải lại
+// extension KHÔNG thay content script đã nằm sẵn trong tab đang mở, nên bản
+// cũ vẫn chạy tiếp và nói chuyện với service worker mới. Trước đây điều đó
+// biểu hiện thành: job chạy hết, tốn tiền dịch, rồi panel đứng im mãi vì
+// content script cũ chờ audioBase64 mà bản mới không còn gửi.
+const PROTOCOL_VERSION = 2;
+
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 // Trần token đầu ra cho một chunk dịch. 2400 là mức của thời viSyllablesPerSec
@@ -909,6 +916,16 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((msg) => {
     const handler = msg.type === 'RESYNTH' ? runResynth : msg.type === 'START' ? runJob : null;
     if (!handler) return;
+    if (msg.protocol !== PROTOCOL_VERSION) {
+      // Chặn TRƯỚC khi gọi API dịch: job kiểu này không bao giờ phát được.
+      post(port, 'ERROR', {
+        message: 'Trang đang chạy bản extension cũ (giao thức v'
+          + (msg.protocol || 1) + ', extension đang là v' + PROTOCOL_VERSION
+          + '). Tải lại trang (Ctrl+Shift+R) rồi bấm lại — chưa tốn lượt gọi API nào.',
+      });
+      log(`từ chối job: content script giao thức v${msg.protocol || 1}, cần v${PROTOCOL_VERSION}`);
+      return;
+    }
     handler(msg, port).catch((err) => {
       post(port, 'ERROR', { message: (err && err.message) ? err.message : String(err) });
     });

@@ -159,7 +159,7 @@ async function runJob(worker, cues, durationSec) {
     onDisconnect: { addListener: (fn) => { disconnect = fn; } },
   };
   worker.context.__onConnect(port);
-  port.__deliver({ type: 'START', videoId: 'vid-1', durationSec, cues });
+  port.__deliver({ type: 'START', protocol: 2, videoId: 'vid-1', durationSec, cues });
 
   // Chờ tới khi có DONE hoặc ERROR (hoặc hết kiên nhẫn).
   for (let i = 0; i < 400; i++) {
@@ -259,4 +259,29 @@ test('đóng tab khi job đang chạy sẽ yêu cầu server huỷ', async () =>
   await new Promise((r) => setTimeout(r, 10));
   const deletes = worker.calls.filter((c) => c.method === 'DELETE');
   assert.strictEqual(deletes.length, 0, 'job đã xong thì không gửi DELETE');
+});
+
+
+test('content script bản cũ bị từ chối NGAY, không tiêu tiền dịch', async () => {
+  const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
+  const received = [];
+  const port = {
+    name: 'dub-job',
+    postMessage: (msg) => received.push(msg),
+    onMessage: { addListener: (fn) => { port.__deliver = fn; } },
+    onDisconnect: { addListener: () => {} },
+  };
+  worker.context.__onConnect(port);
+  // Bản cũ không gửi trường protocol.
+  port.__deliver({ type: 'START', videoId: 'vid-1', durationSec: 20, cues: CUES });
+  await new Promise((r) => setTimeout(r, 30));
+
+  const error = received.find((m) => m.type === 'ERROR');
+  assert.ok(error, 'phải báo ERROR ngay');
+  assert.match(error.message, /Tải lại trang/);
+  assert.strictEqual(
+    worker.calls.filter((c) => c.url.includes('generativelanguage')).length,
+    0,
+    'không được gọi API dịch khi giao thức lệch',
+  );
 });

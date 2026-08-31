@@ -15,6 +15,12 @@
   // DevTools thì chọn context của extension ở dropdown "top".
   const warn = (...args) => console.warn("[LDUB]", ...args);
 
+  // Phải khớp PROTOCOL_VERSION trong background.js. Tải lại extension không
+  // thay content script trong tab đang mở, nên số này là cách duy nhất để
+  // phát hiện bản cũ đang chạy — xem chi tiết ở background.js.
+  const PROTOCOL_VERSION = 2;
+  console.log(`[LDUB] content script v${PROTOCOL_VERSION} đã nạp`);
+
   // SVG nhúng thẳng (không dùng sprite <symbol> dùng chung như trang Cài đặt)
   // — tiêm sprite id cố định vào DOM của Coursera dễ đụng id trùng với chính
   // trang đó. Nguồn: Lucide (MIT, github.com/lucide-icons/lucide), giữ
@@ -630,6 +636,7 @@
       });
       port.postMessage({
         type: "START",
+        protocol: PROTOCOL_VERSION,
         videoId,
         durationSec: video.duration,
         cues,
@@ -1188,6 +1195,7 @@
     });
     port.postMessage({
       type: "RESYNTH",
+      protocol: PROTOCOL_VERSION,
       plan: currentPlan,
       translated: currentTranslated,
       voice,
