@@ -447,7 +447,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
   DUB.plan = {
     STRETCH_MIN, STRETCH_MAX, DEFAULT_RATE,
-    countViSyllables, cuesToSentences, buildPlan, chunkSegments, nextCalibratedRate,
+    countViSyllables, buildPlan, chunkSegments, nextCalibratedRate,
     isUsableTerminology,
     buildTerminologySystemPrompt, buildTerminologyUserPrompt, buildTerminologyRetryUserPrompt,
     parseTerminologyResponse,

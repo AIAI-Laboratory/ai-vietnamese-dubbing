@@ -11,9 +11,8 @@
  * luôn đúng ngay lập tức dù tua tới đâu, không cần buffer.
  */
 (function () {
-  // Chỉ nói khi có chuyện bất thường. Cần xem chi tiết thì gõ __LDUB.dump()
-  // hoặc __LDUB.probe() trong console (chọn context của extension ở dropdown
-  // "top", vì content script chạy ở isolated world).
+  // Content script chạy ở isolated world: muốn thấy cảnh báo này trong
+  // DevTools thì chọn context của extension ở dropdown "top".
   const warn = (...args) => console.warn("[LDUB]", ...args);
 
   // SVG nhúng thẳng (không dùng sprite <symbol> dùng chung như trang Cài đặt)
@@ -648,31 +647,6 @@
       duckTimer = null;
     }
   }
-
-  // Cho phép gõ __LDUB.dump() / __LDUB.probe() trong console (isolated world).
-  globalThis.__LDUB = {
-    dump() {
-      const state = {
-        url: location.href,
-        adapter: site ? site.id : null,
-        video: video ? { duration: video.duration, paused: video.paused, readyState: video.readyState } : null,
-        overlay: Boolean(overlay),
-        dubBtn: dubBtn ? dubBtn.className : null,
-        state: currentState,
-        mode,
-        cues: currentSubtitles ? currentSubtitles.length : 0,
-        duckEnvelope: duckEnv ? `${duckEnv.length} mẫu @ ${duckFps}fps` : null,
-        settings,
-      };
-      console.log("[LDUB]", state);
-      return state;
-    },
-    probe() {
-      const result = DUB.sites.probeTranscriptUI ? DUB.sites.probeTranscriptUI() : "adapter không hỗ trợ";
-      console.log("[LDUB]", result);
-      return result;
-    },
-  };
 
   function base64ToBlob(base64, mime) {
     const binary = atob(base64);

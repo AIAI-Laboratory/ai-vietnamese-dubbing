@@ -90,33 +90,6 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const warn = (...args) => console.warn("[LDUB]", ...args);
 
-  /**
-   * Kiểm tra nhanh xem DOM của YouTube có đúng thứ adapter đang tìm không.
-   * Gọi trong console: __LDUB.probe(). Đây là chỗ hỏng đầu tiên mỗi khi
-   * YouTube đổi cấu trúc trang, nên phải xem được mà không cần sửa code.
-   */
-  function probeTranscriptUI() {
-    const report = {
-      url: location.href,
-      segments: document.querySelectorAll(TRANSCRIPT_SEGMENT).length,
-      descriptionExpander: Boolean(document.querySelector('#description-inline-expander')),
-      expandButton: Boolean(document.querySelector('#description-inline-expander #expand')),
-      buttons: {},
-      nutCoChuTranscript: [],
-    };
-    for (const selector of TRANSCRIPT_BUTTON) {
-      report.buttons[selector] = document.querySelectorAll(selector).length;
-    }
-    // Liệt kê mọi nút có nhãn nghi là transcript, để biết YouTube đang gọi nó là gì.
-    for (const el of document.querySelectorAll('button, [role="button"], tp-yt-paper-button')) {
-      const label = `${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`.trim();
-      if (/transcript|lời thoại|bản chép|phụ đề/i.test(label)) {
-        report.nutCoChuTranscript.push(label.slice(0, 60));
-      }
-    }
-    return report;
-  }
-
   /** "1:02" -> 62; "1:02:03" -> 3723. Trả null nếu không phải mốc thời gian. */
   function parseClockTime(text) {
     const parts = String(text).trim().split(':');
@@ -177,8 +150,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
   async function readTranscriptPanel(video, timeoutMs = 8000) {
     if (!openTranscriptPanel()) {
-      warn('không tìm thấy nút mở bảng transcript. Gõ __LDUB.probe() trong console để xem YouTube đang đặt tên nút là gì:',
-        probeTranscriptUI());
+      warn('không tìm thấy nút mở bảng transcript của YouTube');
       return null;
     }
     const deadline = Date.now() + timeoutMs;
@@ -187,8 +159,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     }
     const rows = readTranscriptRows();
     if (!rows.length) {
-      warn('bảng mở nhưng không có dòng nào — có thể video không có phụ đề, hoặc selector đã đổi:',
-        probeTranscriptUI());
+      warn('bảng transcript mở nhưng không có dòng nào — video có thể không có phụ đề');
       return null;
     }
     const cues = segmentsToCues(rows, video && video.duration);
@@ -207,8 +178,5 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     return ADAPTERS.find((site) => site.matches(url)) || null;
   }
 
-  // parseClockTime/segmentsToCues xuất ra để test được không cần DOM.
-  DUB.sites = {
-    ADAPTERS, current, parseClockTime, segmentsToCues, looksVietnamese, probeTranscriptUI,
-  };
+  DUB.sites = { ADAPTERS, current, parseClockTime, segmentsToCues, looksVietnamese };
 })();

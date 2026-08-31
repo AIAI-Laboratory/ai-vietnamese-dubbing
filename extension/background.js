@@ -612,19 +612,6 @@ async function previewVoice(serverUrl, apiKey, text, voice, timeoutMs) {
   return { base64: arrayBufferToBase64(buf), mime };
 }
 
-async function saveDebugTranscript(settings, payload) {
-  const url = settings.serverUrl.replace(/\/+$/, '') + '/api/debug/transcript';
-  const res = await fetchServer(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(settings.serverApiKey) },
-    body: JSON.stringify(payload),
-  }, 'lưu transcript debug');
-  if (!res.ok) {
-    throw new Error(buildErrorDetail(res.status, await res.text().catch(() => '')));
-  }
-  return res.json();
-}
-
 async function ttsSynthesize(plan, translated, settings) {
   const byId = new Map(translated.map((r) => [r.id, r.vi]));
   const segments = plan.segments.map((g) => ({ id: g.id, start: g.start, end: g.end, vi: byId.get(g.id) || '' }));
@@ -709,8 +696,6 @@ async function runJob(msg, port) {
 
   let terminologyDraft = { subject: '', terms: [] };
   let terminology = terminologyDraft;
-  let terminologyError = '';
-  let terminologyReviewError = '';
   post(port, 'PROGRESS', { stage: 'terminology', pct: 8, note: 'Đang phân tích lĩnh vực và thuật ngữ...' });
   const cachedGlossary = await loadCachedGlossary(msg.videoId);
   if (cachedGlossary) {
@@ -730,26 +715,21 @@ async function runJob(msg, port) {
           throw new Error('bản kiểm định trả về glossary rỗng');
         }
       } catch (error) {
-        terminologyReviewError = error && error.message ? error.message : String(error);
         console.warn('[dub] không kiểm định lại được glossary, dùng bản phân tích đầu:', error);
       }
       log(`thuật ngữ: lĩnh vực=${terminology.subject || '?'} | ${terminology.terms.length} mục`);
       await saveCachedGlossary(msg.videoId, terminology);
     } catch (error) {
-      terminologyError = error && error.message ? error.message : String(error);
       console.warn('[dub] không tạo được glossary riêng, dùng quy tắc nền:', error);
     }
   }
 
   post(port, 'PROGRESS', { stage: 'translate', pct: 12, note: `Đang dịch ${plan.segments.length} câu...` });
   let translated;
-  let draftTranslation = [];
-  let reviewedTranslation = [];
   try {
     translated = await translatePlan(plan, settings, terminology, (done, total) => {
       post(port, 'PROGRESS', { stage: 'translate', pct: 12 + Math.round((done / total) * 38), note: `Dịch ${done}/${total} câu` });
     });
-    draftTranslation = translated.map((segment) => ({ ...segment }));
     post(port, 'PROGRESS', { stage: 'review', pct: 49, note: 'Đang đối chiếu bản dịch với câu gốc...' });
     try {
       translated = await reviewTranslations(plan, translated, reviewerSettings, terminology, (done, total) => {
@@ -763,8 +743,6 @@ async function runJob(msg, port) {
     } catch (error) {
       console.warn('[dub] không khôi phục được canonical term, giữ bản review:', error);
     }
-    reviewedTranslation = translated.map((segment) => ({ ...segment }));
-
     const beforeCompact = DUB.plan.verifyPlan(plan, translated, settings.viSyllablesPerSec).overflowCount;
     if (beforeCompact > 0) {
       post(port, 'PROGRESS', { stage: 'translate', pct: 51, note: `Đang rút gọn ${beforeCompact} câu dài...` });
@@ -792,32 +770,6 @@ async function runJob(msg, port) {
     const vi = translated.find((t) => t.id === s.id);
     return { id: s.id, start: s.start, end: s.end, vi: vi ? vi.vi : '', en: s.en || '' };
   });
-
-  post(port, 'PROGRESS', { stage: 'debug', pct: 53, note: 'Đang lưu transcript debug...' });
-  try {
-    const debug = await saveDebugTranscript(settings, {
-      videoId: msg.videoId,
-      model: GEMINI_MODEL,
-      reviewModel: GEMINI_MODEL,
-      apiBaseUrl: GEMINI_API_ROOT,
-      durationSec: msg.durationSec,
-      planVersion: settings.planVersion,
-      viSyllablesPerSec: settings.viSyllablesPerSec,
-      sourceCues: msg.cues,
-      plan,
-      terminologyDraft,
-      terminology,
-      terminologyError,
-      terminologyReviewError,
-      draftTranslation,
-      reviewedTranslation,
-      finalTranslation: translated,
-      verification: verify,
-    });
-    log(`transcript debug: ${debug.path} | tự xoá sau ${debug.retentionDays} ngày`);
-  } catch (error) {
-    console.warn('[dub] không lưu được transcript debug, job vẫn tiếp tục:', error);
-  }
 
   post(port, 'PROGRESS', { stage: 'synthesize', pct: 55, note: 'Đang gửi tới TTS server...' });
   const tTts = Date.now();

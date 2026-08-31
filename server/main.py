@@ -22,7 +22,6 @@ Vẫn cần ffmpeg trong PATH để nén audio vừa khe và xuất Opus/MP3.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import platform
@@ -73,17 +72,14 @@ from auth import require_api_key
 WORK_DIR = Path(tempfile.gettempdir()) / "local-ai-vi-dub"
 WORK_DIR.mkdir(exist_ok=True)
 LOG_PATH = WORK_DIR / "server.log"
-DEBUG_DIR = SERVER_DIR / "debug_transcripts"
-DEBUG_RETENTION_DAYS = max(1, int(os.environ.get("DEBUG_RETENTION_DAYS", "7")))
-
 # Job xong vẫn giữ audio trong RAM/đĩa để client tải về; sau ngần này phút thì
 # dọn — nếu không, mỗi bài giảng để lại một thư mục temp và một entry JOBS
 # sống tới khi tắt server.
 JOB_RETENTION_MIN = max(5, int(os.environ.get("JOB_RETENTION_MIN", "60")))
 # Chỉ một worker chạy job, nên hàng đợi dài chỉ làm client chờ vô ích.
 MAX_PENDING_JOBS = max(1, int(os.environ.get("MAX_PENDING_JOBS", "4")))
-# Transcript debug của bài dài cỡ vài MB; chặn body lớn hơn để không ai đẩy
-# được file khổng lồ vào đĩa qua endpoint này.
+# Một job cho bài giảng dài có vài nghìn segment; chặn body lớn hơn để không
+# ai đẩy được payload khổng lồ vào server.
 MAX_BODY_BYTES = max(1, int(os.environ.get("MAX_BODY_MB", "16"))) * 1024 * 1024
 
 # job_id do server sinh bằng uuid4().hex[:16] — chốt đúng dạng đó trước khi
@@ -181,46 +177,6 @@ class PreviewRequest(BaseModel):
     voice: str = Field(default="", max_length=64)
 
 
-class DebugTranscriptRequest(BaseModel):
-    videoId: str = Field(min_length=1, max_length=1000)
-    model: str = Field(default="", max_length=300)
-    reviewModel: str = Field(default="", max_length=300)
-    apiBaseUrl: str = Field(default="", max_length=1000)
-    durationSec: float = Field(gt=0, le=21600)
-    planVersion: str = Field(default="", max_length=100)
-    viSyllablesPerSec: float = Field(gt=0, le=20)
-    sourceCues: list[dict] = Field(default_factory=list, max_length=10000)
-    plan: dict = Field(default_factory=dict)
-    terminologyDraft: dict = Field(default_factory=dict)
-    terminology: dict = Field(default_factory=dict)
-    terminologyError: str = Field(default="", max_length=4000)
-    terminologyReviewError: str = Field(default="", max_length=4000)
-    draftTranslation: list[dict] = Field(default_factory=list, max_length=5000)
-    reviewedTranslation: list[dict] = Field(default_factory=list, max_length=5000)
-    finalTranslation: list[dict] = Field(default_factory=list, max_length=5000)
-    verification: dict = Field(default_factory=dict)
-
-
-def _write_debug_transcript(data: dict, directory: Path = DEBUG_DIR) -> Path:
-    """Ghi debug JSON và xoá các bản quá hạn trong cùng thư mục."""
-
-    directory.mkdir(parents=True, exist_ok=True)
-    now = time.time()
-    cutoff = now - DEBUG_RETENTION_DAYS * 86400
-    for old_path in directory.glob("*.json"):
-        try:
-            if old_path.stat().st_mtime < cutoff:
-                old_path.unlink()
-        except OSError:
-            logger.warning("Không dọn được debug file cũ: %s", old_path)
-
-    filename = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
-    path = directory / f"{filename}-{uuid.uuid4().hex[:8]}.json"
-    payload = {"savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), **data}
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
-
-
 @app.get("/api/health")
 def health():
     if ENGINE_ERROR:
@@ -268,13 +224,6 @@ def preview(req: PreviewRequest):
         media_type="audio/wav",
         background=BackgroundTask(out_path.unlink, missing_ok=True),
     )
-
-
-@app.post("/api/debug/transcript")
-def save_debug_transcript(req: DebugTranscriptRequest):
-    path = _write_debug_transcript(req.model_dump())
-    logger.info("Đã lưu transcript debug: %s", path)
-    return {"ok": True, "path": str(path), "retentionDays": DEBUG_RETENTION_DAYS}
 
 
 @app.post("/api/synthesize")

@@ -3,6 +3,5 @@ node_modules/
 
 # Python (server/) — môi trường ảo + cache biên dịch, không commit.
 server/.venv/
-server/debug_transcripts/
 __pycache__/
 *.pyc

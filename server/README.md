@@ -68,7 +68,6 @@ to Vietnamese spoken forms before synthesis; subtitle text is unchanged.
 GET  /api/health               -> loading | ready | error
 GET  /api/voices               -> available Kokoro voices
 POST /api/preview              -> WAV preview
-POST /api/debug/transcript     -> save translation debug JSON under server/debug_transcripts
 POST /api/synthesize           -> jobId
 GET  /api/job/{jobId}          -> queued | running | done | error
 GET  /audio/{jobId}.{ext}      -> final Opus/MP3 audio
@@ -77,15 +76,6 @@ GET  /audio/{jobId}.{ext}      -> final Opus/MP3 audio
 Requests are limited to six-hour videos, 5000 non-empty segments, and valid
 timestamps. Incomplete translation output is rejected instead of being
 rendered as placeholder speech.
-
-Translation debug files are stored inside this project at
-`server/debug_transcripts/*.json`. The directory is ignored by Git. Files
-contain source cues, terminology, draft, reviewed, and final translations,
-but no API keys. Files older than
-`DEBUG_RETENTION_DAYS` (default: 7) are removed when a new debug file is saved.
-
-The extension may use a separate optional quality-review model for glossary and
-semantic review. Debug JSON records both the translation model and review model.
 
 ## Checks
 
