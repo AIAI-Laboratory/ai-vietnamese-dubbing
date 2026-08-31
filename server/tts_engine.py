@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import threading
 import unicodedata
 import wave
 from dataclasses import dataclass
@@ -79,6 +78,7 @@ class SynthResult:
     wav_path: Path
     duration_sec: float
     speed: float = 1.0
+    peak: float = 0.0
 
 
 class KokoroOnnxEngine:
@@ -101,7 +101,6 @@ class KokoroOnnxEngine:
                 f"KOKORO_VOICE={self._default_voice!r} không hợp lệ. Có: {available}"
             )
 
-        self._lock = threading.Lock()
         self._runtime = kokoro_onnx.KokoroOnnx(
             revision=MODEL_REVISION, voice=self._default_voice
         )
@@ -145,20 +144,31 @@ class KokoroOnnxEngine:
 
         voice_name = self._resolve_voice(voice)
         speed = min(max(float(speed), 1.0), SPEED_MAX)
-        with self._lock:
-            audio = self._runtime.synthesize(spoken_text, voice=voice_name, speed=speed)
+        # KHÔNG khoá ở đây: kokoro_onnx.synthesize không giữ state giữa các lần
+        # gọi và onnxruntime cho phép chạy song song. Đo trên 6 core: 3 câu
+        # song song hạ RTF từ 0.397 xuống 0.232.
+        audio = self._runtime.synthesize(spoken_text, voice=voice_name, speed=speed)
 
         audio = self._np.asarray(audio, dtype=self._np.float32).reshape(-1)
         if len(audio) == 0 or not self._np.isfinite(audio).all():
             raise RuntimeError("Kokoro trả về audio rỗng hoặc không hợp lệ")
 
+        # Kokoro trả biên độ vượt toàn thang khá thường xuyên (đo trên 8 câu
+        # thật: peak 1.10-1.39, tức 0.04-0.31% số mẫu). Cắt phẳng bằng clip là
+        # méo nghe được ở âm to; hạ đều cả câu xuống dưới trần thì không.
+        # Hạ theo từng câu chứ không theo cả bài vì bài được ghép dần từng
+        # câu; RMS của model rất ổn định (0.2474 +- 0.0001) nên chênh lệch độ
+        # to giữa các câu sau khi hạ vẫn dưới 2 dB.
+        peak = float(self._np.max(self._np.abs(audio)))
+        if peak > 0.99:
+            audio = audio * (0.99 / peak)
         pcm = (self._np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
         with wave.open(str(out_path), "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(self.sample_rate)
             wav.writeframes(pcm)
-        return SynthResult(out_path, len(audio) / self.sample_rate, speed)
+        return SynthResult(out_path, len(audio) / self.sample_rate, speed, round(peak, 3))
 
 
 def load_engine() -> KokoroOnnxEngine:

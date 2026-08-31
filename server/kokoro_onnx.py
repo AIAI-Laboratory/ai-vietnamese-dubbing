@@ -20,6 +20,7 @@ import json
 import os
 import pickle
 import re
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -278,6 +279,10 @@ class KokoroOnnx:
             model_path, sess_options=_session_options(), providers=["CPUExecutionProvider"]
         )
         self._voicepacks: dict[str, np.ndarray] = {}
+        # Chỉ khoá lúc nạp voicepack (tải file + giải nén). session.run của
+        # onnxruntime an toàn khi gọi từ nhiều luồng, và synthesize không sửa
+        # state nào của object, nên phần chạy model cố tình không khoá.
+        self._voice_lock = threading.Lock()
         self.load_voice(voice)
 
     @property
@@ -290,12 +295,16 @@ class KokoroOnnx:
             return cached
         if voice not in VOICES:
             raise ValueError(f"voice {voice!r} không có. Có: {', '.join(sorted(VOICES))}")
-        path = hf_hub_download(
-            repo_id=REPO_ID, filename=VOICES[voice]["filename"], revision=self.revision
-        )
-        voicepack = load_voicepack(path)
-        self._voicepacks[voice] = voicepack
-        return voicepack
+        with self._voice_lock:
+            cached = self._voicepacks.get(voice)
+            if cached is not None:
+                return cached  # luồng khác vừa nạp xong
+            path = hf_hub_download(
+                repo_id=REPO_ID, filename=VOICES[voice]["filename"], revision=self.revision
+            )
+            voicepack = load_voicepack(path)
+            self._voicepacks[voice] = voicepack
+            return voicepack
 
     def synthesize(
         self,

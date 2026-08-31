@@ -91,6 +91,11 @@ ENABLE_DOCS = os.environ.get("ENABLE_DOCS", "").strip().lower() in ("1", "true",
 # chậm. Không có trần thì job treo vĩnh viễn và worker duy nhất kẹt theo, mọi
 # job sau xếp hàng sau một thứ không bao giờ xong.
 SYNTH_TIMEOUT_SEC = max(30, int(os.environ.get("SYNTH_TIMEOUT_SEC", "300")))
+# Số câu tổng hợp cùng lúc. onnxruntime không scale tuyến tính theo thread (đo
+# trên 6 core: 1 thread RTF 0.84, 6 thread 0.40 — chỉ nhanh 2.1 lần), nên chạy
+# vài câu song song lấp được phần CPU bỏ trống: 3 câu song song đưa RTF xuống
+# 0.232, nhanh hơn 1.7 lần so với chạy tuần tự.
+SYNTH_WORKERS = max(1, int(os.environ.get("SYNTH_WORKERS", "3")))
 # Hệ số ước dung lượng cần cho một job: master WAV + toàn bộ câu đã cắt vừa
 # khe (giữ tới lúc ghép) + file nén cuối.
 DISK_BYTES_PER_SEC = 24000 * 2 * 2.5
@@ -451,20 +456,22 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
     set_progress(0.0, status="running")
 
     try:
-        segment_wavs = []
         meta = []
+        segment_wavs = []
         t_synth_total = 0.0
         slots = audio_pipeline.available_slots(
             [{"id": s.id, "start": s.start, "end": s.end} for s in req.segments],
             req.durationSec,
         )
-        for i, seg in enumerate(req.segments):
+
+        def synthesize_one(seg):
+            """Tổng hợp một câu và nén cho vừa khe. Chạy trên nhiều luồng."""
+
             if _job_cancelled(job_id):
                 raise JobCancelled()
             raw_wav = job_dir / f"{seg.id:04d}_raw.wav"
             fit_wav = job_dir / f"{seg.id:04d}_fit.wav"
             text = seg.vi.strip()
-            syllables = tts_engine.count_vi_syllables(text)
             slot_sec = slots[seg.id]
 
             t0 = time.time()
@@ -475,28 +482,34 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             if base_sec > slot_sec + 0.02:
                 result = _synth_with_timeout(text, raw_wav, req.voice, base_sec / slot_sec)
             t_synth = time.time() - t0
-            t_synth_total += t_synth
 
-            info = audio_pipeline.stretch_to_fit(
-                raw_wav,
-                fit_wav,
-                result.duration_sec,
-                slot_sec,
-            )
+            info = audio_pipeline.stretch_to_fit(raw_wav, fit_wav, result.duration_sec, slot_sec)
             raw_wav.unlink(missing_ok=True)
             # baseSec = độ dài lúc đọc tốc độ thường; measuredSyllablesPerSec
             # phải tính trên nó, không phải trên bản đã tăng tốc.
             info.update(
-                id=seg.id, syllables=syllables, speed=result.speed, baseSec=round(base_sec, 3)
+                id=seg.id,
+                syllables=tts_engine.count_vi_syllables(text),
+                speed=result.speed,
+                baseSec=round(base_sec, 3),
+                peak=result.peak,
             )
-            meta.append(info)
-            segment_wavs.append(({"start": seg.start, "end": seg.end}, fit_wav))
+            return info, ({"start": seg.start, "end": seg.end}, fit_wav), t_synth
 
-            eta = (t_synth_total / (i + 1)) * (total - i - 1)
-            logger.info("%s [%3d/%d] id=%-4d %2d âm tiết | synth %5.2fs -> %5.2fs audio | khe %5.2fs | speed %.2fx | nén %.2fx%s | còn ~%s",
-                        tag, i + 1, total, seg.id, syllables, t_synth, info["naturalSec"], info["slotSec"], info["speed"], info["stretch"],
-                        " | CẮT BỚT" if info["overflowTruncated"] else "", _fmt_dur(eta))
-            set_progress((i + 1) / total * 0.7, etaSec=round(eta, 1), doneSegments=i + 1, totalSegments=total)
+        workers = min(SYNTH_WORKERS, total)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kokoro-seg") as pool:
+            # map trả kết quả đúng thứ tự câu, nên tiến độ và log vẫn tuần tự
+            # dù việc chạy song song.
+            for i, (info, pair, t_synth) in enumerate(pool.map(synthesize_one, req.segments)):
+                meta.append(info)
+                segment_wavs.append(pair)
+                t_synth_total += t_synth
+                elapsed = time.time() - t_job
+                eta = (elapsed / (i + 1)) * (total - i - 1)
+                logger.info("%s [%3d/%d] id=%-4d %2d âm tiết | synth %5.2fs -> %5.2fs audio | khe %5.2fs | speed %.2fx | nén %.2fx%s | còn ~%s",
+                            tag, i + 1, total, info["id"], info["syllables"], t_synth, info["naturalSec"], info["slotSec"], info["speed"], info["stretch"],
+                            " | CẮT BỚT" if info["overflowTruncated"] else "", _fmt_dur(eta))
+                set_progress((i + 1) / total * 0.7, etaSec=round(eta, 1), doneSegments=i + 1, totalSegments=total)
 
         master_wav = job_dir / "master.wav"
         t0 = time.time()
@@ -527,9 +540,9 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             )
         audio_sec = sum(m["finalSec"] for m in meta)
         elapsed = time.time() - t_job
-        logger.info("%s XONG sau %s — synth chiếm %s | %.1fs audio | RTF %.2fx | %d câu bị cắt",
-                    tag, _fmt_dur(elapsed), _fmt_dur(t_synth_total), audio_sec,
-                    (t_synth_total / audio_sec) if audio_sec > 0 else 0.0, len(overflow))
+        logger.info("%s XONG sau %s — %d luồng | %.1fs audio | RTF %.2fx | %d câu bị cắt",
+                    tag, _fmt_dur(elapsed), min(SYNTH_WORKERS, total), audio_sec,
+                    (elapsed / audio_sec) if audio_sec > 0 else 0.0, len(overflow))
     except JobCancelled:
         logger.info("%s ĐÃ HUỶ sau %s", tag, _fmt_dur(time.time() - t_job))
         shutil.rmtree(job_dir, ignore_errors=True)
