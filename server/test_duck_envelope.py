@@ -60,7 +60,10 @@ class DuckEnvelopeTest(unittest.TestCase):
 
     def test_silent_track_never_ducks(self) -> None:
         gains = self._gains(tone_sec=0.0, silence_sec=2.0)
-        self.assertTrue(all(g >= ap.DUCK_SILENT - 1e-6 for g in gains))
+        # Đường bao truyền đi dưới dạng uint8 nên mỗi mẫu lệch tối đa nửa bước
+        # lượng tử (1/255) so với mức lý thuyết.
+        quantization_step = 1 / 255
+        self.assertTrue(all(g >= ap.DUCK_SILENT - quantization_step for g in gains))
 
 
 if __name__ == "__main__":

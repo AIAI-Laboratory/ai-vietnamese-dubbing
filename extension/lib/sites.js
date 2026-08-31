@@ -88,7 +88,6 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const VI_MARKS = /[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const log = (...args) => console.log("[LDUB]", ...args);
   const warn = (...args) => console.warn("[LDUB]", ...args);
 
   /**
@@ -162,26 +161,16 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
   /** Bấm nút mở bảng transcript nếu nó chưa mở. */
   function openTranscriptPanel() {
-    if (document.querySelector(TRANSCRIPT_SEGMENT)) {
-      log("bảng transcript đã mở sẵn");
-      return true;
-    }
+    if (document.querySelector(TRANSCRIPT_SEGMENT)) return true;
     // Phần mô tả phải mở rộng thì nút transcript mới được render.
     const expand = document.querySelector('#description-inline-expander #expand');
-    if (expand) {
-      log("mở rộng phần mô tả video để lộ nút transcript");
-      expand.click();
-    } else {
-      log("không thấy nút mở rộng mô tả (#description-inline-expander #expand)");
-    }
+    if (expand) expand.click();
     for (const selector of TRANSCRIPT_BUTTON) {
       const button = document.querySelector(selector);
       if (button) {
-        log(`bấm nút transcript khớp selector: ${selector} | nhãn: "${(button.getAttribute('aria-label') || button.textContent || '').trim().slice(0, 60)}"`);
         button.click();
         return true;
       }
-      log(`selector không khớp: ${selector}`);
     }
     return false;
   }
@@ -192,22 +181,17 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
         probeTranscriptUI());
       return null;
     }
-    const t0 = Date.now();
-    const deadline = t0 + timeoutMs;
+    const deadline = Date.now() + timeoutMs;
     while (!document.querySelector(TRANSCRIPT_SEGMENT) && Date.now() < deadline) {
       await sleep(200);
     }
     const rows = readTranscriptRows();
-    log(`bảng transcript: ${rows.length} dòng sau ${Date.now() - t0}ms`);
     if (!rows.length) {
       warn('bảng mở nhưng không có dòng nào — có thể video không có phụ đề, hoặc selector đã đổi:',
         probeTranscriptUI());
       return null;
     }
-    log('dòng đầu:', JSON.stringify(rows[0]), '| dòng cuối:', JSON.stringify(rows[rows.length - 1]));
-
     const cues = segmentsToCues(rows, video && video.duration);
-    log(`chuyển thành ${cues.length} cue (bỏ ${rows.length - cues.length} dòng không parse được mốc thời gian)`);
     if (!cues.length) return null;
     if (looksVietnamese(cues)) {
       warn('bảng transcript đang ở tiếng Việt — mở menu ngôn ngữ trong bảng, chọn English rồi bấm lại');

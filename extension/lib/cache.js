@@ -28,14 +28,20 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     });
   }
 
-  /** Khoá cache thay đổi theo toàn bộ cấu hình có thể làm audio khác đi. */
-  function makeKey({ videoId, voice, planVersion, translationModel, viSyllablesPerSec }) {
+  /**
+   * Khoá cache: những gì làm bản lồng tiếng khác hẳn đi.
+   *
+   * CỐ TÌNH không đưa viSyllablesPerSec vào đây. Tốc độ đọc tự hiệu chỉnh sau
+   * mỗi job, nên nếu nó nằm trong khoá thì lần xem lại nào cũng trượt cache và
+   * phải dịch lại từ đầu. Bản đã lồng tiếng vẫn nghe bình thường dù lần sau
+   * planner dùng tốc độ khác một chút.
+   */
+  function makeKey({ videoId, voice, planVersion, translationModel }) {
     return JSON.stringify([
       videoId,
       voice || 'default',
       planVersion || 'v1',
       translationModel || '',
-      viSyllablesPerSec || 0,
     ]);
   }
 

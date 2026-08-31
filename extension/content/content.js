@@ -11,25 +11,10 @@
  * luôn đúng ngay lập tức dù tua tới đâu, không cần buffer.
  */
 (function () {
-  // -------------------------------------------------------------------------
-  // Log chẩn đoán. Xem ở DevTools console, chọn context của extension trong
-  // ô dropdown "top" (content script chạy ở isolated world, mặc định console
-  // chỉ hiện log của trang). Mọi log đều mang tiền tố [LDUB].
-  //
-  // Trong console gõ __LDUB.dump() để xem trạng thái hiện tại, hoặc
-  // __LDUB.probe() để kiểm tra riêng phần DOM của YouTube.
-  // -------------------------------------------------------------------------
-  const log = (...args) => console.log("[LDUB]", ...args);
+  // Chỉ nói khi có chuyện bất thường. Cần xem chi tiết thì gõ __LDUB.dump()
+  // hoặc __LDUB.probe() trong console (chọn context của extension ở dropdown
+  // "top", vì content script chạy ở isolated world).
   const warn = (...args) => console.warn("[LDUB]", ...args);
-  const seenOnce = new Set();
-  /** Log một lần cho mỗi khoá — vòng lặp init chạy mỗi giây, đừng spam. */
-  function logOnce(key, ...args) {
-    if (seenOnce.has(key)) return;
-    seenOnce.add(key);
-    log(...args);
-  }
-
-  log("content script nạp lúc", new Date().toISOString(), "|", location.href);
 
   // SVG nhúng thẳng (không dùng sprite <symbol> dùng chung như trang Cài đặt)
   // — tiêm sprite id cố định vào DOM của Coursera dễ đụng id trùng với chính
@@ -108,11 +93,6 @@
     const next = DUB.sites && DUB.sites.current ? DUB.sites.current() : null;
     if (next === site) return;
     site = next;
-    if (site) {
-      log("adapter:", site.id, "| videoId:", site.videoId());
-    } else {
-      log("URL này không phải trang xem video, extension đứng yên:", location.href);
-    }
   }
 
   function videoIdFromUrl() {
@@ -144,7 +124,6 @@
       voice,
       planVersion: settings.planVersion,
       translationModel: "gemini-3.1-flash-lite",
-      viSyllablesPerSec: settings.viSyllablesPerSec,
     };
   }
 
@@ -155,14 +134,7 @@
 
   function findVideo() {
     const vids = [...document.querySelectorAll("video")];
-    const chosen = vids.find((v) => v.duration > 0) || vids[0] || null;
-    if (!chosen) {
-      logOnce("no-video", "chưa thấy thẻ <video> nào trên trang, sẽ thử lại mỗi giây");
-    } else if (!chosen.duration) {
-      logOnce("video-no-duration",
-        `thấy ${vids.length} thẻ <video> nhưng chưa cái nào có duration (readyState=${chosen.readyState})`);
-    }
-    return chosen;
+    return vids.find((v) => v.duration > 0) || vids[0] || null;
   }
 
   function teardown() {
@@ -223,7 +195,6 @@
       const here = location.pathname + location.search;
       if (here !== lastPath) {
         lastPath = here;
-        log("URL đổi ->", here);
         teardown();
         refreshSite();
       }
@@ -237,23 +208,14 @@
     const v = findVideo();
     if (!v || v === video) return; // chưa có video, hoặc đã gắn overlay cho đúng video này rồi
     video = v;
-    log(`tìm thấy <video> ${v.videoWidth}x${v.videoHeight}, dài ${v.duration}s — đang gắn nút Dub`);
     try {
       await loadSettings();
-      log("cài đặt:", {
-        server: settings.serverUrl,
-        coServerApiKey: Boolean(settings.serverApiKey),
-        voice: settings.voice || "(mặc định)",
-        viSyllablesPerSec: settings.viSyllablesPerSec,
-        bedVolume: settings.bedVolume,
-      });
     } catch (error) {
       console.error("[LDUB] không nạp được cài đặt extension:", error);
       video = null;
       return;
     }
     injectOverlay();
-    log("đã gắn nút Dub:", dubBtn ? "OK" : "THẤT BẠI (dubBtn rỗng)");
   }
 
   // -------------------------------------------------------------------------
@@ -548,12 +510,7 @@
         return;
       }
 
-      log(`đang đọc phụ đề qua adapter "${site.id}"...`);
-      const tCues = Date.now();
       const cues = await site.getCues(video);
-      log(`đọc phụ đề xong sau ${Date.now() - tCues}ms:`,
-        cues ? `${cues.length} cue` : "KHÔNG CÓ",
-        cues && cues.length ? `| cue đầu: ${JSON.stringify(cues[0])}` : "");
       if (!cues || !cues.length) {
         setPanel(
           0,
@@ -707,12 +664,12 @@
         duckEnvelope: duckEnv ? `${duckEnv.length} mẫu @ ${duckFps}fps` : null,
         settings,
       };
-      log("trạng thái:", state);
+      console.log("[LDUB]", state);
       return state;
     },
     probe() {
       const result = DUB.sites.probeTranscriptUI ? DUB.sites.probeTranscriptUI() : "adapter không hỗ trợ";
-      log("probe DOM:", result);
+      console.log("[LDUB]", result);
       return result;
     },
   };

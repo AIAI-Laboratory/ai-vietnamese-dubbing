@@ -38,10 +38,13 @@ BORROW_GAP_SEC = 0.08
 # nhạc nền và tiếng động vẫn còn. Tính từ chính track thuyết minh đã dựng
 # xong: chỉ đổi độ lợi, không đụng vào phổ tín hiệu, nên không sinh nhiễu.
 DUCK_FPS = 20  # 50 ms mỗi mẫu — đủ mịn, 40 phút video chỉ tốn 48 KB
-# Mức nền khi đang đọc và khi im lặng, theo thực hành voice-over phát thanh
-# (-15 dB và -6 dB). volume của HTML5 là biên độ tuyến tính: 10^(dB/20).
-DUCK_SPEAKING = 0.18
-DUCK_SILENT = 0.50
+# Mức nền khi đang đọc và khi im lặng; volume của HTML5 là biên độ tuyến
+# tính nên quy đổi dB là 10^(dB/20). -20 dB dưới giọng thuyết minh và -9 dB
+# trong khoảng lặng — thấp hơn mức -15/-6 dB của voice-over phát thanh, vì
+# tiếng gốc ở đây cũng là giọng người: nghe rõ chữ là đâm vào giọng đọc,
+# khác hẳn nhạc nền.
+DUCK_SPEAKING = 0.10
+DUCK_SILENT = 0.35
 # Ngưỡng coi là "đang có tiếng đọc" (RMS trên toàn thang, ~-34 dBFS).
 DUCK_SPEECH_RMS = 0.02
 # Xuống nhanh để không đè lên đầu câu, lên chậm để nền dâng êm.

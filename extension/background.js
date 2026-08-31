@@ -357,7 +357,6 @@ async function fillMissingSentences(segments, parsed, settings, system, chunkNum
     }
     const wanted = new Set(missing.map((seg) => seg.id));
     const added = retry.filter((row) => wanted.has(row.id) && row.vi && row.vi.trim());
-    log(`chunk ${chunkNumber} dịch lại lần ${attempt}: bù được ${added.length}/${missing.length} câu`);
     filled = filled.concat(added);
   }
   return filled;
@@ -380,11 +379,8 @@ async function translatePlan(plan, settings, terminology, onProgress) {
     for (let i = cursor++; i < chunks.length; i = cursor++) {
       const segs = chunks[i].map((g) => ({ ...g, __rate: settings.viSyllablesPerSec }));
       const user = DUB.plan.buildTranslateUserPrompt(segs);
-      const t = Date.now();
-      log(`chunk ${i + 1}/${chunks.length} gửi đi — ${segs.length} câu, ${user.length} ký tự`);
       const raw = await chatComplete(settings, system, user, outputTokenBudget(segs, 600));
       let parsed = DUB.plan.parseTranslationResponse(raw);
-      log(`chunk ${i + 1}/${chunks.length} xong sau ${Date.now() - t}ms — nhận ${parsed.length}/${segs.length} câu`);
       parsed = await fillMissingSentences(chunks[i], parsed, settings, system, i + 1);
       results[i] = parsed;
       doneCount += parsed.length;
