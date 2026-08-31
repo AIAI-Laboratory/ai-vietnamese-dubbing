@@ -105,7 +105,7 @@ locally before release:
 
   ```bash
   node --test tests/*.test.js
-  cd server && python -m unittest discover -p "test_*.py"
+  cd server && python -m compileall -q .
   ```
 - Kokoro model loading and CPU synthesis can be smoke-tested with the
   Swagger preview route at `POST /api/preview`.

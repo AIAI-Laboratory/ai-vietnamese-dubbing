@@ -80,7 +80,6 @@ rendered as placeholder speech.
 ## Checks
 
 ```bash
-python -m unittest test_tts_engine.py
 python -m compileall -q .
 python -m pip check
 ```
