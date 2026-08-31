@@ -23,12 +23,18 @@ from __future__ import annotations
 
 import base64
 import math
+import os
 import subprocess
 import wave
 from pathlib import Path
 
 STRETCH_MAX = 1.10
 SAMPLE_RATE = 24000
+# ffmpeg thường xong trong dưới một giây cho một câu, nhưng nếu nó chờ gì đó
+# thì không có gì đánh thức nó dậy: job đứng im vô hạn và worker duy nhất của
+# server kẹt theo. Chốt trần thời gian, và đóng luôn stdin — ffmpeg hỏi
+# "overwrite?" trên stdin là một kiểu treo kinh điển.
+FFMPEG_TIMEOUT_SEC = max(30, int(os.environ.get("FFMPEG_TIMEOUT_SEC", "120")))
 # Khoảng thở chừa lại trước câu kế khi mượn khoảng lặng — hết sạch thì hai
 # câu dính liền nhau, nghe hụt hơi.
 BORROW_GAP_SEC = 0.08
@@ -111,7 +117,17 @@ def available_slots(segments: list[dict], duration_sec: float) -> dict[int, floa
 
 
 def _run_ffmpeg(args: list[str]) -> None:
-    proc = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args], capture_output=True, text=True)
+    command = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", *args]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=FFMPEG_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg không phản hồi sau {FFMPEG_TIMEOUT_SEC}s, đã buộc dừng")
     if proc.returncode != 0:
         raise RuntimeError("ffmpeg lỗi: " + proc.stderr.strip()[:500])
 

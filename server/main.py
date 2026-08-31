@@ -82,6 +82,16 @@ MAX_PENDING_JOBS = max(1, int(os.environ.get("MAX_PENDING_JOBS", "4")))
 # ai đẩy được payload khổng lồ vào server.
 MAX_BODY_BYTES = max(1, int(os.environ.get("MAX_BODY_MB", "16"))) * 1024 * 1024
 
+# Trần thời gian tổng hợp MỘT câu. Kokoro chạy ~0.35x thời gian thực, nên một
+# câu 30 giây mất khoảng 10 giây; quá ngần này là nó đã kẹt chứ không phải
+# chậm. Không có trần thì job treo vĩnh viễn và worker duy nhất kẹt theo, mọi
+# job sau xếp hàng sau một thứ không bao giờ xong.
+SYNTH_TIMEOUT_SEC = max(30, int(os.environ.get("SYNTH_TIMEOUT_SEC", "300")))
+# Hệ số ước dung lượng cần cho một job: master WAV + toàn bộ câu đã cắt vừa
+# khe (giữ tới lúc ghép) + file nén cuối.
+DISK_BYTES_PER_SEC = 24000 * 2 * 2.5
+DISK_MARGIN_BYTES = 64 * 1024 * 1024
+
 # job_id do server sinh bằng uuid4().hex[:16] — chốt đúng dạng đó trước khi
 # ghép vào đường dẫn file.
 JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -151,6 +161,75 @@ def _evict_old_jobs() -> None:
         shutil.rmtree(WORK_DIR / job_id, ignore_errors=True)
     if expired:
         logger.info("Đã dọn %d job quá hạn (> %d phút)", len(expired), JOB_RETENTION_MIN)
+
+
+def _synth_with_timeout(text: str, out_path: Path, voice: str, speed: float):
+    """Gọi ENGINE.synth trong thread riêng, bỏ cuộc nếu quá hạn.
+
+    Thread không giết được từ bên ngoài nên nếu quá hạn thì coi như engine hỏng:
+    đánh dấu ENGINE_ERROR để /api/health nói thật và job mới bị từ chối bằng
+    503 thay vì xếp hàng sau một câu không bao giờ xong. Dùng daemon thread để
+    cái đang kẹt không giữ tiến trình lại lúc tắt server.
+    """
+
+    global ENGINE, ENGINE_ERROR
+    box: dict[str, object] = {}
+
+    def run():
+        try:
+            box["result"] = ENGINE.synth(text, out_path, voice=voice, speed=speed)
+        except BaseException as exc:  # noqa: BLE001 - chuyển nguyên vẹn sang luồng gọi
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True, name="kokoro-synth")
+    worker.start()
+    worker.join(SYNTH_TIMEOUT_SEC)
+    if worker.is_alive():
+        ENGINE_ERROR = (
+            f"Tổng hợp một câu quá {SYNTH_TIMEOUT_SEC}s không xong — engine đang kẹt, "
+            "khởi động lại server."
+        )
+        ENGINE = None
+        logger.error(ENGINE_ERROR)
+        raise RuntimeError(ENGINE_ERROR)
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
+def _require_disk_space(duration_sec: float) -> None:
+    """Từ chối sớm nếu đĩa không đủ chỗ cho job này.
+
+    Hết đĩa giữa chừng thì job chết sau khi đã tổng hợp hàng trăm câu, và còn
+    để lại đống file tạm làm đĩa đầy thêm.
+    """
+
+    needed = int(duration_sec * DISK_BYTES_PER_SEC) + DISK_MARGIN_BYTES
+    free = shutil.disk_usage(WORK_DIR).free
+    if free < needed:
+        raise HTTPException(
+            507,
+            f"Không đủ dung lượng đĩa: cần khoảng {needed // (1024 * 1024)} MB cho video này, "
+            f"còn trống {free // (1024 * 1024)} MB tại {WORK_DIR}",
+        )
+
+
+def _sweep_stale_job_dirs() -> None:
+    """Dọn thư mục job còn sót từ lần chạy trước (server bị tắt giữa job)."""
+
+    cutoff = time.time() - JOB_RETENTION_MIN * 60
+    removed = 0
+    for path in WORK_DIR.iterdir():
+        if not path.is_dir() or not JOB_ID_RE.fullmatch(path.name):
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+        except OSError:
+            logger.warning("Không dọn được thư mục job cũ: %s", path)
+    if removed:
+        logger.info("Đã dọn %d thư mục job sót lại từ lần chạy trước", removed)
 
 
 def _validated_job_id(job_id: str) -> str:
@@ -244,6 +323,7 @@ def synthesize(req: SynthesizeRequest):
     if len(ids) != len(set(ids)):
         raise HTTPException(422, "ID segment bị trùng")
     _evict_old_jobs()
+    _require_disk_space(req.durationSec)
     with JOBS_LOCK:
         pending = sum(1 for job in JOBS.values() if job["status"] in ("queued", "running"))
     if pending >= MAX_PENDING_JOBS:
@@ -325,14 +405,12 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             slot_sec = slots[seg.id]
 
             t0 = time.time()
-            result = ENGINE.synth(text, raw_wav, voice=req.voice)
+            result = _synth_with_timeout(text, raw_wav, req.voice, 1.0)
             base_sec = result.duration_sec
             # Vượt khe: đọc lại nhanh hơn bằng tốc độ native — prosody vẫn tự
             # nhiên, hơn hẳn kéo giãn tín hiệu bằng atempo ở bước sau.
             if base_sec > slot_sec + 0.02:
-                result = ENGINE.synth(
-                    text, raw_wav, voice=req.voice, speed=base_sec / slot_sec
-                )
+                result = _synth_with_timeout(text, raw_wav, req.voice, base_sec / slot_sec)
             t_synth = time.time() - t0
             t_synth_total += t_synth
 
@@ -389,8 +467,16 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         logger.info("%s XONG sau %s — synth chiếm %s | %.1fs audio | RTF %.2fx | %d câu bị cắt",
                     tag, _fmt_dur(elapsed), _fmt_dur(t_synth_total), audio_sec,
                     (t_synth_total / audio_sec) if audio_sec > 0 else 0.0, len(overflow))
+    except OSError as e:
+        # Errno 28/ENOSPC trên Linux, WinError 112 trên Windows.
+        logger.exception("%s LỖI ĐĨA sau %s", tag, _fmt_dur(time.time() - t_job))
+        shutil.rmtree(job_dir, ignore_errors=True)
+        detail = f"Lỗi ghi đĩa (có thể đã hết dung lượng tại {WORK_DIR}): {e}"
+        with JOBS_LOCK:
+            JOBS[job_id].update(status="error", error=detail, finishedAt=time.time())
     except Exception as e:
         logger.exception("%s LỖI sau %s", tag, _fmt_dur(time.time() - t_job))
+        shutil.rmtree(job_dir, ignore_errors=True)
         with JOBS_LOCK:
             JOBS[job_id].update(status="error", error=str(e), finishedAt=time.time())
 
@@ -458,6 +544,7 @@ def main() -> None:
         args.host,
         args.port,
     )
+    _sweep_stale_job_dirs()
     threading.Thread(target=load_engine_background, daemon=True).start()
     print_server_info(args.host, args.port)
 
