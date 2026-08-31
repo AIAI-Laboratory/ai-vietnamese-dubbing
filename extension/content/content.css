@@ -272,6 +272,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+  /* Danh sách xổ xuống do HỆ ĐIỀU HÀNH vẽ, không ăn theo màu của .ldub-voice.
+     Không khai hai thứ dưới đây thì trên nền sáng của trang, danh sách ra nền
+     trắng chữ xám nhạt — gần như không đọc được. */
+  color-scheme: dark;
+}
+.ldub-voice option {
+  background: #17181c;
+  color: #f5f5f7;
 }
 .ldub-voice:disabled { opacity: .55; cursor: default; }
 .ldub-voice:focus { outline: 2px solid var(--ldub-accent); outline-offset: 1px; }

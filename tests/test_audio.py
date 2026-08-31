@@ -347,3 +347,69 @@ class WindowPlanTest(unittest.TestCase):
         windows = ap.plan_windows(segments, 60.0, target_sec=20.0)
         starts = [w["startSec"] for w in windows]
         self.assertEqual(starts, sorted(starts))
+
+
+class NumberReadingTest(unittest.TestCase):
+    """vig2p không đọc chữ số: "1000" ra phoneme "→000". Phải đổi sang chữ."""
+
+    def spoken(self, text):
+        import tts_engine
+
+        return tts_engine.normalize_for_speech(text)
+
+    def test_reads_plain_integers(self):
+        cases = {
+            "0": "không",
+            "7": "bảy",
+            "10": "mười",
+            "100": "một trăm",
+            "1000": "một nghìn",
+            "1000000": "một triệu",
+            "2000000000": "hai tỷ",
+        }
+        for digits, expected in cases.items():
+            with self.subTest(digits=digits):
+                self.assertEqual(self.spoken(digits), expected)
+
+    def test_follows_vietnamese_irregular_forms(self):
+        # Những chỗ tiếng Việt không đọc theo quy tắc đều.
+        self.assertEqual(self.spoken("15"), "mười lăm")       # không phải "mười năm"
+        self.assertEqual(self.spoken("21"), "hai mươi mốt")   # không phải "hai mươi một"
+        self.assertEqual(self.spoken("24"), "hai mươi tư")
+        self.assertEqual(self.spoken("25"), "hai mươi lăm")
+        self.assertEqual(self.spoken("105"), "một trăm lẻ năm")
+
+    def test_splits_letters_from_digits(self):
+        # Mã giảm giá kiểu SAVE10 phải tách thì G2P mới đọc được cả hai vế.
+        self.assertEqual(self.spoken("SAVE10"), "SAVE mười")
+        self.assertEqual(self.spoken("mã save 20"), "mã save hai mươi")
+
+    def test_thousands_separator_is_not_a_decimal_point(self):
+        self.assertEqual(self.spoken("1.000"), "một nghìn")
+        self.assertEqual(self.spoken("1,000"), "một nghìn")
+        self.assertEqual(self.spoken("1.234.567"),
+                         "một triệu hai trăm ba mươi tư nghìn năm trăm sáu mươi bảy")
+
+    def test_decimals_and_percent(self):
+        self.assertEqual(self.spoken("3.14"), "ba phẩy một bốn")
+        self.assertEqual(self.spoken("50%"), "năm mươi phần trăm")
+
+    def test_version_numbers_say_cham(self):
+        self.assertEqual(self.spoken("3.11.4"), "ba chấm mười một chấm bốn")
+
+    def test_identifiers_are_spelled_out(self):
+        # Số 0 đứng đầu là mã số chứ không phải giá trị.
+        self.assertEqual(self.spoken("007"), "không không bảy")
+        self.assertEqual(self.spoken("0912"), "không chín một hai")
+
+    def test_no_digit_survives_into_the_phonemiser(self):
+        import kokoro_onnx
+
+        samples = ["Bài 12 nói về 3 quy tắc.", "Giảm 50% cho mã SAVE10.",
+                   "Có 1.000 dòng code trong Python 3.11.4."]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                spoken = self.spoken(sample)
+                self.assertFalse(any(ch.isdigit() for ch in spoken), spoken)
+                # Và G2P phải ra phoneme thật, không phải dấu thanh trơ trọi.
+                self.assertGreater(len(kokoro_onnx.phonemize(spoken)), 20)

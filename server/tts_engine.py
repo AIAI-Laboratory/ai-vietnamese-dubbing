@@ -45,13 +45,118 @@ _VI_MARKS = re.compile(
 )
 
 
+# --- Đọc số ------------------------------------------------------------------
+# vig2p KHÔNG đọc chữ số: đo trên engine thật, "1000" ra phoneme "→000",
+# "3.14" ra "↗.→↓", "50%" ra "ʔ↗0%" — nghĩa là mọi con số trong bài giảng
+# thành tiếng rác. Phải đổi sang chữ trước khi đưa vào G2P.
+_DIGIT_WORDS = ["không", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín"]
+_SCALES = ["", " nghìn", " triệu", " tỷ"]
+# Số dài hơn ngần này đọc từng chữ số (mã đơn hàng, số điện thoại, hash...)
+# thay vì đọc thành hàng tỷ — nghe không ai theo kịp mà cũng không phải ý.
+_SPELL_OUT_DIGITS = 12
+
+
+def _read_three(value: int, leading: bool) -> str:
+    """Đọc một nhóm ba chữ số. leading=True là nhóm đầu tiên của cả số."""
+
+    hundreds, tens, ones = value // 100, (value // 10) % 10, value % 10
+    parts: list[str] = []
+    if hundreds or not leading:
+        parts.append(f"{_DIGIT_WORDS[hundreds]} trăm")
+    if tens == 0:
+        if ones:
+            # "lẻ" chỉ cần khi phía trước đã có hàng trăm: 105 -> một trăm lẻ năm.
+            parts.append(f"lẻ {_DIGIT_WORDS[ones]}" if parts else _DIGIT_WORDS[ones])
+    elif tens == 1:
+        parts.append("mười")
+        if ones == 5:
+            parts.append("lăm")  # 15 là "mười lăm", không phải "mười năm"
+        elif ones:
+            parts.append(_DIGIT_WORDS[ones])
+    else:
+        parts.append(f"{_DIGIT_WORDS[tens]} mươi")
+        if ones == 1:
+            parts.append("mốt")  # 21 là "hai mươi mốt"
+        elif ones == 4:
+            parts.append("tư")   # 24 là "hai mươi tư"
+        elif ones == 5:
+            parts.append("lăm")  # 25 là "hai mươi lăm"
+        elif ones:
+            parts.append(_DIGIT_WORDS[ones])
+    return " ".join(parts)
+
+
+def read_number(digits: str) -> str:
+    """Chuỗi chữ số -> cách đọc tiếng Việt."""
+
+    if not digits.isdigit():
+        return digits
+    # Số 0 đứng đầu mang nghĩa mã số chứ không phải giá trị: đọc từng chữ số.
+    if len(digits) > _SPELL_OUT_DIGITS or (len(digits) > 1 and digits[0] == "0"):
+        return " ".join(_DIGIT_WORDS[int(d)] for d in digits)
+
+    value = int(digits)
+    if value == 0:
+        return _DIGIT_WORDS[0]
+
+    groups: list[int] = []
+    while value:
+        groups.append(value % 1000)
+        value //= 1000
+
+    spoken: list[str] = []
+    for index in range(len(groups) - 1, -1, -1):
+        group = groups[index]
+        if group == 0:
+            continue
+        chunk = _read_three(group, leading=index == len(groups) - 1)
+        spoken.append(chunk + _SCALES[index] if index < len(_SCALES) else chunk)
+    return " ".join(spoken)
+
+
+# "SAVE10" -> "SAVE 10": G2P đọc được cả hai vế khi chúng tách rời.
+_LETTER_DIGIT = re.compile(r"(?<=[A-Za-zÀ-ỹ])(?=\d)|(?<=\d)(?=[A-Za-zÀ-ỹ])")
+# Số phiên bản (3.11.4) đọc "chấm", không phải "phẩy" — và phải xử lý TRƯỚC
+# luật thập phân, nếu không "3.11" bị nuốt còn ".4" rơi lại nguyên xi.
+_VERSION = re.compile(r"\b\d+(?:\.\d+){2,}\b")
+# 1.000 / 1,000 là dấu phân nhóm nghìn; 3.14 / 3,14 là phần thập phân.
+# Lookahead cuối chặn khớp một phần: "3.111.4" không được ăn thành "3.111"
+# rồi bỏ lại ".4" — cả chuỗi đó là số phiên bản.
+_GROUPED = re.compile(r"\b(\d{1,3}(?:[.,]\d{3})+)\b(?![.,]?\d)")
+_DECIMAL = re.compile(r"\b(\d+)[.,](\d{1,2})\b")
+_INTEGER = re.compile(r"\d+")
+
+
+def _read_decimal(match: re.Match) -> str:
+    whole, fraction = match.group(1), match.group(2)
+    digits = " ".join(_DIGIT_WORDS[int(d)] for d in fraction)
+    return f"{read_number(whole)} phẩy {digits}"
+
+
+def normalize_numbers(text: str) -> str:
+    """Đổi mọi chữ số trong câu sang chữ đọc được."""
+
+    text = _LETTER_DIGIT.sub(" ", text)
+    text = text.replace("%", " phần trăm")
+    # Nhóm nghìn xét TRƯỚC số phiên bản: "1.234.567" khớp cả hai kiểu, và mọi
+    # nhóm đúng ba chữ số thì đó là dấu phân nhóm chứ không phải phiên bản.
+    text = _GROUPED.sub(lambda m: read_number(re.sub(r"[.,]", "", m.group(1))), text)
+    text = _VERSION.sub(
+        lambda m: " chấm ".join(read_number(part) for part in m.group(0).split(".")), text
+    )
+    text = _DECIMAL.sub(_read_decimal, text)
+    text = _INTEGER.sub(lambda m: read_number(m.group(0)), text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
 def normalize_for_speech(text: str) -> str:
-    """Đổi acronym kỹ thuật phổ biến sang cách đọc tiếng Việt."""
+    """Chuẩn hoá câu trước khi đưa vào G2P: acronym và chữ số."""
 
     normalized = unicodedata.normalize("NFC", text).strip()
-    return _SPOKEN_TERM_RE.sub(
+    normalized = _SPOKEN_TERM_RE.sub(
         lambda match: _SPOKEN_TERMS[match.group(0).upper()], normalized
     )
+    return normalize_numbers(normalized)
 
 
 def count_vi_syllables(text: str) -> int:
