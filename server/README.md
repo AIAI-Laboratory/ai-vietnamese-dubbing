@@ -6,6 +6,18 @@ Python + FastAPI, API-only. Swagger UI is available at `/docs`: click
 Speech synthesis uses Kokoro-Vietnamese ONNX on the local CPU. After the
 model is downloaded, translated text is not sent to a speech provider.
 
+The ONNX inference layer lives in `kokoro_onnx.py` and runs on numpy and
+onnxruntime alone. The upstream `kokoro-vietnamese` package declares gradio,
+torch and transformers as hard dependencies, which is 670 MB of wheels for a
+server that has no UI and used torch for a single `torch.load` of a 512 KB
+voicepack; that file is now read directly. Installed dependencies came down
+from 1079 MB to 282 MB, and the audio is bit-identical to the upstream ONNX
+path. Text-to-phoneme still uses `vig2p`, which pulls in only `sea-g2p`.
+
+Set `ORT_THREADS` to bound onnxruntime's thread count when the server runs
+with fewer cores than the host has - inside a CPU-limited container, for
+instance.
+
 ## Install
 
 ```bash

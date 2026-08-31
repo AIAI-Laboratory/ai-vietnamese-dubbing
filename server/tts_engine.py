@@ -1,4 +1,4 @@
-"""Kokoro-Vietnamese ONNX engine chạy hoàn toàn trên CPU."""
+"""Kokoro-Vietnamese ONNX engine chạy hoàn toàn trên CPU (xem kokoro_onnx.py)."""
 
 from __future__ import annotations
 
@@ -82,30 +82,19 @@ class SynthResult:
 
 
 class KokoroOnnxEngine:
-    """Một ONNX session dùng chung, voicepack được cache và đổi dưới lock."""
+    """Một ONNX session dùng chung; voicepack đổi dưới lock giữa các job."""
 
     name = "Kokoro-Vietnamese ONNX (CPU, local)"
     sample_rate = SAMPLE_RATE
 
     def __init__(self) -> None:
         import numpy as np
-        import torch
-        from huggingface_hub import hf_hub_download
-        from kokoro_vietnamese import (
-            DEFAULT_CONFIG_FILE,
-            DEFAULT_HF_REPO_ID,
-            DEFAULT_ONNX_FILE,
-            DEFAULT_VOICE,
-            VOICES,
-        )
-        from kokoro_vietnamese.onnx_cli import KokoroVietnameseONNX
+
+        import kokoro_onnx
 
         self._np = np
-        self._torch = torch
-        self._hf_hub_download = hf_hub_download
-        self._repo_id = DEFAULT_HF_REPO_ID
-        self._voices = VOICES
-        self._default_voice = os.environ.get("KOKORO_VOICE", DEFAULT_VOICE).strip()
+        self._voices = kokoro_onnx.VOICES
+        self._default_voice = os.environ.get("KOKORO_VOICE", kokoro_onnx.DEFAULT_VOICE).strip()
         if self._default_voice not in self._voices:
             available = ", ".join(sorted(self._voices))
             raise ValueError(
@@ -113,38 +102,17 @@ class KokoroOnnxEngine:
             )
 
         self._lock = threading.Lock()
-        model_path = hf_hub_download(
-            repo_id=self._repo_id,
-            filename=DEFAULT_ONNX_FILE,
-            revision=MODEL_REVISION,
+        self._runtime = kokoro_onnx.KokoroOnnx(
+            revision=MODEL_REVISION, voice=self._default_voice
         )
-        config_path = hf_hub_download(
-            repo_id=self._repo_id,
-            filename=DEFAULT_CONFIG_FILE,
-            revision=MODEL_REVISION,
-        )
-        voicepack_path = hf_hub_download(
-            repo_id=self._repo_id,
-            filename=self._voices[self._default_voice]["filename"],
-            revision=MODEL_REVISION,
-        )
-        self._runtime = KokoroVietnameseONNX(
-            device="cpu",
-            voice=self._default_voice,
-            onnx_path=model_path,
-            config_path=config_path,
-            voicepack_path=voicepack_path,
-        )
-        self._voicepacks = {self._default_voice: self._runtime.voicepack}
 
         # Warm-up một lần để request đầu tiên không chịu chi phí tối ưu graph.
-        audio, _ = self._runtime.synthesize("Xin chào.", crossfade_ms=0)
-        if len(audio) == 0:
+        if len(self._runtime.synthesize("Xin chào.", crossfade_ms=0)) == 0:
             raise RuntimeError("Kokoro warm-up không tạo được audio")
         logger.info(
             "Kokoro sẵn sàng: voice=%s | providers=%s",
             self._default_voice,
-            self._runtime.session.get_providers(),
+            self._runtime.providers,
         )
 
     def list_voices(self) -> list[dict[str, str]]:
@@ -166,19 +134,6 @@ class KokoroOnnxEngine:
             raise ValueError(f"Không có voice Kokoro {name!r}")
         return name
 
-    def _load_voicepack(self, voice: str):
-        cached = self._voicepacks.get(voice)
-        if cached is not None:
-            return cached
-        path = self._hf_hub_download(
-            repo_id=self._repo_id,
-            filename=self._voices[voice]["filename"],
-            revision=MODEL_REVISION,
-        )
-        voicepack = self._torch.load(path, map_location="cpu", weights_only=True)
-        self._voicepacks[voice] = voicepack
-        return voicepack
-
     def synth(
         self, text: str, out_path: Path, voice: str = "", speed: float = 1.0
     ) -> SynthResult:
@@ -191,8 +146,7 @@ class KokoroOnnxEngine:
         voice_name = self._resolve_voice(voice)
         speed = min(max(float(speed), 1.0), SPEED_MAX)
         with self._lock:
-            self._runtime.voicepack = self._load_voicepack(voice_name)
-            audio, _ = self._runtime.synthesize(spoken_text, speed=speed)
+            audio = self._runtime.synthesize(spoken_text, voice=voice_name, speed=speed)
 
         audio = self._np.asarray(audio, dtype=self._np.float32).reshape(-1)
         if len(audio) == 0 or not self._np.isfinite(audio).all():
