@@ -27,6 +27,7 @@
       "js": [
         "lib/vtt.js",
         "lib/sites.js",
+        "lib/windows.js",
         "lib/cache.js",
         "content/content.js"
       ],

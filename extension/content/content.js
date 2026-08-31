@@ -737,18 +737,16 @@
     }
     document.body.appendChild(el);
 
-    audioWindows.push({
+    DUB.windows.insert(audioWindows, {
       startSec: Number(win.startSec) || 0,
       endSec: typeof win.endSec === "number" ? win.endSec : Infinity,
       el,
-      duck: decodeDuckEnvelope(win.duckEnvelope),
+      duck: DUB.windows.decodeEnvelope(win.duckEnvelope),
     });
-    audioWindows.sort((a, b) => a.startSec - b.startSec);
   }
 
-  /** Cửa sổ phủ mốc thời gian này, hoặc null nếu chưa tổng hợp tới. */
   function windowAt(seconds) {
-    return audioWindows.find((w) => seconds >= w.startSec && seconds < w.endSec) || null;
+    return DUB.windows.pick(audioWindows, seconds);
   }
 
   /** Đổi cửa sổ đang phát: dừng cái cũ, đặt đúng vị trí cho cái mới. */
@@ -767,7 +765,7 @@
     if (!activeWindow || !video) return;
     try {
       // Neo tuyệt đối: vị trí trong cửa sổ = thời điểm video trừ mốc bắt đầu.
-      activeWindow.el.currentTime = Math.max(0, video.currentTime - activeWindow.startSec);
+      activeWindow.el.currentTime = DUB.windows.offsetIn(activeWindow, video.currentTime);
     } catch (e) {
       /* audio chưa sẵn sàng nhận currentTime — vòng sync 250ms sẽ chỉnh lại */
     }
@@ -785,31 +783,12 @@
   // tainted CORS.
   // -------------------------------------------------------------------------
 
-  function decodeDuckEnvelope(env) {
-    if (!env || !env.data || !env.fps) return null; // bản cũ trong cache không có
-    try {
-      const binary = atob(env.data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      // Mảng rỗng vẫn "truthy": để lọt thì tra ra phần tử -1, thành NaN, và
-      // video giữ nguyên âm lượng gốc thay vì được hạ xuống.
-      return bytes.length ? { bytes, fps: env.fps } : null;
-    } catch (e) {
-      console.warn("[LDUB] đường bao ducking hỏng, quay lại mute video gốc:", e);
-      return null;
-    }
-  }
-
   function hasDuckEnvelope() {
     return audioWindows.some((win) => win.duck);
   }
 
   function bedGainAt(seconds) {
-    const win = activeWindow || windowAt(seconds);
-    if (!win || !win.duck) return 0;
-    const index = Math.round((seconds - win.startSec) * win.duck.fps);
-    if (index < 0 || index >= win.duck.bytes.length) return 0;
-    return win.duck.bytes[index] / 255;
+    return DUB.windows.gainAt(activeWindow || windowAt(seconds), seconds);
   }
 
   function applyBedVolume() {
@@ -951,7 +930,7 @@
       return;
     }
 
-    const drift = (video.currentTime - activeWindow.startSec) - el.currentTime;
+    const drift = DUB.windows.offsetIn(activeWindow, video.currentTime) - el.currentTime;
     const base = video.playbackRate;
 
     if (Math.abs(drift) > SYNC_HARD_SEC) {
