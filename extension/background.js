@@ -1,32 +1,14 @@
-/**
- * Service worker — điều phối job lồng tiếng:
- *   plan (lib/plan.js) -> dịch qua Gemini API chính thức -> gửi sang
- *   TTS server (server/, http://127.0.0.1:18765 mặc định) -> trả audio về
- *   content script qua Port.
- *
- * Extension chỉ gọi API dịch do người dùng cấu hình và TTS server trên
- * chính máy này. Kokoro chạy local; audio/video và bản dịch không được gửi
- * tới dịch vụ giọng nói bên ngoài.
- *
- * Không dùng "type":"module" trong manifest nên nạp lib bằng importScripts —
- * đúng chuẩn MV3 cho service worker cổ điển, không cần build step.
- */
+/** Service worker — điều phối job lồng tiếng */
 importScripts('lib/vtt.js', 'lib/plan.js');
 
 const DEFAULT_SETTINGS = {
-  // Dịch qua Gemini API chính thức. Model cố định để tối ưu độ ổn định/quota.
   geminiApiKey: '',
   timeoutMs: 30000,
 
-  // TTS server (server/, xem server/README.md) — serverApiKey BẮT BUỘC:
-  // server từ chối khởi động nếu chưa đặt API_KEY, nên mọi request đều cần
-  // đúng key đó (đọc trong server/.env), không có kiểu "để trống được".
   serverUrl: 'http://127.0.0.1:18765',
   serverApiKey: '',
   voice: '',
 
-  // Baseline ban đầu của giọng Kokoro mặc định; sau mỗi job, tốc độ server
-  // đo được sẽ kéo giá trị này về đúng giọng đang dùng (xem calibrateRate).
   viSyllablesPerSec: 3.8,
 
   planVersion: 'gemini-v2',
@@ -35,51 +17,34 @@ const DEFAULT_SETTINGS = {
 const GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
-// Phiên bản giao thức giữa content script và service worker. Tải lại
-// extension KHÔNG thay content script đã nằm sẵn trong tab đang mở, nên bản
-// cũ vẫn chạy tiếp và nói chuyện với service worker mới. Trước đây điều đó
-// biểu hiện thành: job chạy hết, tốn tiền dịch, rồi panel đứng im mãi vì
-// content script cũ chờ audioBase64 mà bản mới không còn gửi.
+/** Phải khớp PROTOCOL_VERSION trong content/content.js: tải lại extension không thay content script của tab đang mở. */
 const PROTOCOL_VERSION = 2;
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
-// Trần token đầu ra cho một chunk dịch. 2400 là mức của thời viSyllablesPerSec
-// còn 2.6; sau khi hạn mức âm tiết tăng ~46%, chunk 25 câu vượt trần và Gemini
-// cắt cụt phần đuôi — biểu hiện đúng như đã gặp: nhận 17/25 câu, thiếu id
-// 18-25. Đây là trần chứ không phải mục tiêu nên nâng lên không tốn thêm gì
-// khi bản dịch ngắn.
 const TRANSLATE_MAX_TOKENS = 8192;
 const TRANSLATE_CHUNK_SIZE = 25;
-// Tuần tự để tương thích các gói có TPM thấp; mỗi request vẫn hoàn tất nhanh.
 const TRANSLATE_CONCURRENCY = 1;
 let apiCooldownUntil = 0;
 
-/** Log vào console của service worker: chrome://extensions -> "service worker". */
+/** Log vào console của service worker */
 function log(...args) { console.log('[dub]', ...args); }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-// Ước lượng token đầu ra. Cả hai công thức cũ đều thiếu phần khung JSON
-// ({"id":..,"vi":".."} tốn khoảng 20-25 token mỗi dòng) nên cấp trần kiểu 571
-// token cho 25 câu — phản hồi bị cắt giữa chừng, parse JSON hỏng, cả pass
-// review lẫn pass rút gọn câu dài đều chết. Trần rộng không tốn thêm gì khi
-// phản hồi ngắn: model dừng khi viết xong.
 const JSON_ROW_OVERHEAD_TOKENS = 25;
 const PROMPT_TAIL_TOKENS = 200;
 
-/** Trần cho bước DỊCH: ước theo hạn mức âm tiết của chính các câu đó. */
+/** Trần cho bước DỊCH */
 function outputTokenBudget(rows, floor = 600) {
   const syllables = rows.reduce((sum, row) => sum + Number(row.budget && row.budget.max || row.max || 0), 0);
-  // Một âm tiết tiếng Việt thường 1-2 token; lấy 3 cho chắc, đây là trần.
   const estimate = syllables * 3 + rows.length * JSON_ROW_OVERHEAD_TOKENS + PROMPT_TAIL_TOKENS;
   return Math.min(TRANSLATE_MAX_TOKENS, Math.max(floor, estimate));
 }
 
-/** Trần cho các bước VIẾT LẠI: đầu ra dài xấp xỉ bản dịch đang có. */
+/** Trần cho các bước VIẾT LẠI */
 function reviewTokenBudget(rows, floor = 800) {
   const characters = rows.reduce((sum, row) => sum + String(row.vi || row.en || '').length, 0);
-  // Tiếng Việt có dấu ~2 ký tự mỗi token.
   const estimate = Math.ceil(characters / 2) + rows.length * JSON_ROW_OVERHEAD_TOKENS + PROMPT_TAIL_TOKENS;
   return Math.min(TRANSLATE_MAX_TOKENS, Math.max(floor, estimate));
 }
@@ -122,10 +87,6 @@ async function loadSettings() {
   if (changed) await chrome.storage.local.set({ settings });
   return settings;
 }
-
-// ---------------------------------------------------------------------------
-// Gemini API chính thức: POST models/{model}:generateContent?key=...
-// ---------------------------------------------------------------------------
 
 /** Rút gọn lỗi Gemini/FastAPI về thông báo đủ ngắn cho UI. */
 function buildErrorDetail(status, rawBody) {
@@ -282,11 +243,6 @@ async function testGemini({ geminiApiKey, timeoutMs }) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Dịch toàn bộ plan — chia chunk để tránh phản hồi quá dài bị cắt cụt. Số
-// worker mặc định là 1 để không vượt TPM của các gói API thấp.
-// ---------------------------------------------------------------------------
-
 async function analyzeTerminology(plan, settings) {
   let terminology;
   try {
@@ -297,9 +253,6 @@ async function analyzeTerminology(plan, settings) {
       700,
     );
     terminology = DUB.plan.parseTerminologyResponse(raw);
-    // JSON hợp lệ nhưng rỗng ruột không ném lỗi, nên phải tự bắt: đã gặp một
-    // lần chạy trả subject rỗng và 0 thuật ngữ cho đúng bài giảng mà lần
-    // trước ra 24 mục.
     if (!DUB.plan.isUsableTerminology(terminology)) {
       throw new Error('glossary rỗng (không có lĩnh vực hoặc không có thuật ngữ nào)');
     }
@@ -336,12 +289,7 @@ async function reviewTerminology(terminology, settings) {
   return DUB.plan.parseTerminologyResponse(raw);
 }
 
-/**
- * Dịch lại riêng những câu chunk vừa rồi bỏ sót. Thiếu một câu là hỏng cả
- * job (server bắt buộc mọi segment phải có bản dịch), mà nguyên nhân thường
- * chỉ là phản hồi bị cắt ở đuôi — hỏi lại đúng phần thiếu thì rẻ hơn nhiều
- * so với bỏ toàn bộ công đã dịch.
- */
+/** Dịch lại riêng những câu chunk vừa rồi bỏ sót. */
 async function fillMissingSentences(segments, parsed, settings, system, chunkNumber, attempts = 2) {
   let filled = parsed;
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -380,8 +328,6 @@ async function translatePlan(plan, settings, terminology, onProgress) {
 
   log(`dịch ${plan.segments.length} câu — ${chunks.length} chunk x ${TRANSLATE_CHUNK_SIZE} câu, ${workers} luồng song song`);
 
-  // Mỗi worker tự bốc chunk kế tiếp thay vì chia đều trước: một chunk chậm
-  // không chặn worker khác, tổng thời gian bám chunk chậm nhất chứ không cộng dồn.
   async function worker() {
     for (let i = cursor++; i < chunks.length; i = cursor++) {
       const segs = chunks[i].map((g) => ({ ...g, __rate: settings.viSyllablesPerSec }));
@@ -395,7 +341,6 @@ async function translatePlan(plan, settings, terminology, onProgress) {
     }
   }
 
-  // Worker đầu tiên ném lỗi thì toàn bộ job dừng, không cache kết quả thiếu.
   await Promise.all(Array.from({ length: workers }, worker));
 
   const all = results.flat();
@@ -518,13 +463,6 @@ async function compactOverflowTranslations(plan, translated, settings, terminolo
   ));
 }
 
-// ---------------------------------------------------------------------------
-// Glossary đã duyệt được giữ lại theo videoId: chạy lại cùng một bài giảng
-// (xoá cache, đổi giọng, đổi tốc độ đọc) phải ra đúng thuật ngữ như lần
-// trước, thay vì phụ thuộc việc model hôm nay trả về gì. Cũng tiết kiệm hai
-// lượt gọi Gemini mỗi lần chạy lại.
-// ---------------------------------------------------------------------------
-
 const GLOSSARY_CACHE_KEY = 'glossaryCache';
 const GLOSSARY_CACHE_MAX = 30;
 
@@ -546,7 +484,6 @@ async function saveCachedGlossary(videoId, terminology) {
     const stored = await chrome.storage.local.get(GLOSSARY_CACHE_KEY);
     const cache = { ...(stored[GLOSSARY_CACHE_KEY] || {}) };
     cache[videoId] = { terminology, savedAt: Date.now() };
-    // Giữ kích thước có hạn: bỏ bản cũ nhất khi vượt ngưỡng.
     const ids = Object.keys(cache).sort((a, b) => (cache[b].savedAt || 0) - (cache[a].savedAt || 0));
     const trimmed = Object.fromEntries(ids.slice(0, GLOSSARY_CACHE_MAX).map((id) => [id, cache[id]]));
     await chrome.storage.local.set({ [GLOSSARY_CACHE_KEY]: trimmed });
@@ -555,19 +492,11 @@ async function saveCachedGlossary(videoId, terminology) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// TTS server local — hợp đồng API mô tả trong server/README.md.
-// ---------------------------------------------------------------------------
-
 function authHeaders(apiKey) {
   return apiKey ? { 'X-API-Key': apiKey } : {};
 }
 
-/**
- * fetch tới TTS server kèm thông báo lỗi nói rõ chuyện gì. fetch ném
- * TypeError trần trụi "Failed to fetch" khi server chưa chạy, mà panel lại
- * hiện thẳng câu đó cho người dùng — không ai đoán ra là phải bật server.
- */
+/** fetch tới TTS server kèm thông báo lỗi nói rõ chuyện gì. */
 async function fetchServer(url, options, what) {
   try {
     return await fetch(url, options);
@@ -641,10 +570,7 @@ function formatDur(sec) {
   return `${sec.toFixed(1)}s`;
 }
 
-/**
- * Theo dõi job và tải từng cửa sổ audio ngay khi server công bố, không chờ
- * cả bài xong. onWindow nhận cửa sổ đã kèm audio base64.
- */
+/** Theo dõi job và tải từng cửa sổ audio ngay khi server công bố, không chờ cả bài xong. */
 async function ttsPoll(jobId, settings, onProgress, onWindow) {
   const url = settings.serverUrl.replace(/\/+$/, '') + '/api/job/' + jobId;
   let fetched = 0;
@@ -697,14 +623,6 @@ async function fetchAudioAsBase64(audioUrl, serverBaseUrl, apiKey) {
   return { base64: arrayBufferToBase64(buf), mime };
 }
 
-// ---------------------------------------------------------------------------
-// Điều phối job qua Port — giữ service worker sống nhờ fetch liên tục trong
-// lúc chạy; job cho một bài giảng vài chục phút vẫn hoàn tất trong một lượt.
-// ---------------------------------------------------------------------------
-
-// jobId của TTS server đang chạy cho từng port. Đóng tab là port đóng, và khi
-// đó phải bảo server dừng: worker của nó chỉ có một, để job mồ côi chạy tiếp
-// nghĩa là mọi tab khác chờ dài.
 const jobsByPort = new WeakMap();
 
 async function cancelServerJob(settings, jobId) {
@@ -724,8 +642,6 @@ function post(port, type, data) {
   try {
     port.postMessage({ type, ...data });
   } catch (e) {
-    // Tab đóng giữa chừng là chuyện thường; còn lại (message quá lớn, cấu
-    // trúc không clone được) là lỗi thật và trước đây bị nuốt sạch.
     const closed = /disconnected|closed/i.test(e && e.message ? e.message : '');
     if (!closed) console.warn(`[dub] không gửi được message ${type}:`, e);
   }
@@ -757,7 +673,6 @@ async function runJob(msg, port) {
       try {
         terminology = await reviewTerminology(terminologyDraft, reviewerSettings);
         if (!DUB.plan.isUsableTerminology(terminology)) {
-          // Bản kiểm định rỗng thì bản phân tích đầu vẫn tốt hơn là không có gì.
           terminology = terminologyDraft;
           throw new Error('bản kiểm định trả về glossary rỗng');
         }
@@ -834,10 +749,7 @@ async function runJob(msg, port) {
     (win) => {
       const first = windows.length === 0;
       windows.push(win);
-      // Cửa sổ đầu tiên tới là người xem nghe được ngay, phần còn lại chạy nền.
       log(`cửa sổ ${win.index} [${win.startSec}s-${win.endSec}s] về sau ${((Date.now() - tTts) / 1000).toFixed(1)}s`);
-      // plan/phụ đề chỉ cần đi kèm cửa sổ đầu; gửi lại mỗi lần là nhân đôi
-      // một payload cỡ trăm KB cho mỗi cửa sổ.
       post(port, 'WINDOW', first ? { window: win, plan, translated, subtitles } : { window: win });
     },
   );
@@ -853,11 +765,7 @@ async function runJob(msg, port) {
   log(`job xong toàn bộ sau ${((Date.now() - tJob) / 1000).toFixed(1)}s`);
 }
 
-/**
- * Kéo viSyllablesPerSec về tốc độ đọc thật mà server vừa đo. Không có bước
- * này thì baseline đứng yên mãi: hạn mức âm tiết sai, bản dịch bị ép ngắn
- * hơn mức audio chứa được, và verifyPlan báo "vượt" cho những câu vốn vừa.
- */
+/** Kéo viSyllablesPerSec về tốc độ đọc thật mà server vừa đo. */
 async function calibrateRate(settings, measured) {
   const next = DUB.plan.nextCalibratedRate(settings.viSyllablesPerSec, measured);
   if (next === settings.viSyllablesPerSec) return;
@@ -917,7 +825,6 @@ chrome.runtime.onConnect.addListener((port) => {
     const handler = msg.type === 'RESYNTH' ? runResynth : msg.type === 'START' ? runJob : null;
     if (!handler) return;
     if (msg.protocol !== PROTOCOL_VERSION) {
-      // Chặn TRƯỚC khi gọi API dịch: job kiểu này không bao giờ phát được.
       post(port, 'ERROR', {
         message: 'Trang đang chạy bản extension cũ (giao thức v'
           + (msg.protocol || 1) + ', extension đang là v' + PROTOCOL_VERSION
@@ -932,14 +839,9 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Messages một-lượt cho trang Options, content script và TTS server.
-// ---------------------------------------------------------------------------
-
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_CONTENT_SETTINGS') {
     loadSettings().then((settings) => {
-      // Cả hai key đều ở lại service worker; content script không cần cái nào.
       const { geminiApiKey, serverApiKey, ...contentSettings } = settings;
       sendResponse({ ok: true, settings: contentSettings });
     })
@@ -982,9 +884,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
-  // serverUrl/serverApiKey lấy từ storage, KHÔNG nhận theo message: content
-  // script chạy trong tiến trình của trang web, không có lý do gì để nó cầm
-  // key của server hay chỉ định được địa chỉ mà service worker sẽ gọi.
   if (msg.type === 'FETCH_TTS_VOICES') {
     loadSettings()
       .then((settings) => fetchVoices(settings.serverUrl, settings.serverApiKey, msg.timeoutMs))

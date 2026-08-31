@@ -1,13 +1,4 @@
-/**
- * Popup icon extension — nơi chỉnh nhanh mọi thứ TRỪ API dịch/giọng đọc
- * (Gemini API key và giọng đọc nằm ở trang Cài đặt, xem options/options.js). Đổi ở đây áp
- * dụng ngay cho lần mở/tải lại tab Coursera kế tiếp — content script chỉ
- * đọc settings lúc trang tải, không có kênh đẩy live vào tab đang mở.
- *
- * QUAN TRỌNG: settings là MỘT object dùng chung với options.js. save()
- * dưới đây đọc bản hiện có rồi chỉ ghi đè đúng các trường popup quản —
- * không tự bịa nguyên object mới, sẽ xoá mất API key/model options.js giữ.
- */
+/** Popup icon extension — nơi chỉnh nhanh mọi thứ TRỪ API dịch/giọng đọc (Gemini API key và giọng đọc nằm ở trang Cài đặt, xem options/options.js). */
 
 const DEFAULTS = {
   dubVolume: 1.0,
@@ -28,8 +19,7 @@ async function getSettings() {
   return { ...DEFAULTS, ...(stored.settings || {}) };
 }
 
-/** Đọc bản hiện có, ghi đè đúng field trong `patch`, lưu lại nguyên object —
- * giữ Gemini API key/giọng của options.js an toàn. */
+/** Đọc bản hiện có, ghi đè đúng field trong `patch`, lưu lại nguyên object — giữ Gemini API key/giọng của options.js an toàn. */
 async function saveFields(patch) {
   const stored = await chrome.storage.local.get('settings');
   const settings = { ...(stored.settings || {}), ...patch };
@@ -64,8 +54,6 @@ async function loadControls() {
   $('subtitleColor').value = s.subtitleColor;
 }
 
-// Âm lượng: lưu ngay khi kéo (input), không đợi thả chuột — cùng lúc cập
-// nhật số hiển thị + thanh trượt tô màu.
 $('bedVolume').addEventListener('input', (e) => {
   $('bedVolumeVal').textContent = (+e.target.value).toFixed(2);
   fillSlider(e.target);
@@ -91,8 +79,6 @@ $('btnResetSubPos').addEventListener('click', async () => {
   setTimeout(() => { btn.textContent = original; }, 2500);
 });
 
-// Cache nằm trong IndexedDB của chính trang video, nên phải xoá qua một tab
-// đang mở của trang đó — mỗi trang hỗ trợ là một origin riêng.
 const SUPPORTED_TAB_URLS = ['https://www.coursera.org/*', 'https://www.youtube.com/*'];
 const SUPPORTED_PAGE_RE = /^https:\/\/(www\.coursera\.org\/learn\/|www\.youtube\.com\/watch)/;
 
@@ -120,11 +106,6 @@ async function onClearCache() {
 $('btnClearCache').addEventListener('click', onClearCache);
 
 $('btnOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
-
-// ---------------------------------------------------------------------------
-// Trạng thái cấu hình + TTS server — giữ nguyên hành vi cũ, chỉ dời xuống
-// dưới các control mới thêm.
-// ---------------------------------------------------------------------------
 
 async function main() {
   await loadControls();

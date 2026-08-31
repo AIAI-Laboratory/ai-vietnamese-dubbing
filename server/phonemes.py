@@ -55,10 +55,7 @@ def backend():
 
 
 def _looks_english(raw: str) -> bool:
-    """Cho biết sea_g2p vừa đọc từ này bằng từ điển tiếng Anh hay tiếng Việt.
-
-    Từ mơ hồ (set, map — hai thứ tiếng đọc như nhau) đi đường tiếng Việt.
-    """
+    """Cho biết sea_g2p vừa đọc từ này bằng từ điển tiếng Anh hay tiếng Việt."""
 
     return bool(_EN_MARKERS.search(raw)) and not _VI_MARKERS.search(raw)
 
@@ -78,7 +75,7 @@ def to_vietnamese_sounds(phonemes: str) -> str:
 def phonemize(text: str) -> str:
     """Chuyển câu thành phoneme, hậu xử lý theo ngôn ngữ của từng từ.
 
-    Không dùng vig2p.phonemize_text: nó áp luật tiếng Việt lên cả từ tiếng Anh,
+    Không dùng vig2p.phonemize_text: nó áp luật tiếng Việt cho cả từ tiếng Anh,
     biến nguyên âm ɜː thành dấu thanh nên "server" mất hẳn vần.
     """
 

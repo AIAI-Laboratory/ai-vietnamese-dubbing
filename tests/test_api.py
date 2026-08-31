@@ -1,7 +1,4 @@
-"""Hợp đồng HTTP: xác thực, giới hạn, vòng đời job.
-
-Chạy từ gốc repo: python -m unittest discover -s tests -t tests
-"""
+"""Hợp đồng HTTP"""
 
 import asyncio
 import shutil
@@ -64,8 +61,6 @@ class AuthTest(unittest.TestCase):
         )
 
     def test_non_ascii_key_gives_401_not_an_exception(self):
-        # Header HTTP được decode latin-1; compare_digest trên str như vậy ném
-        # TypeError, và lỗi đó từng thoát ra khỏi ứng dụng.
         status = asyncio.run(raw_request([(b"host", b"x"), (b"x-api-key", b"caf\xe9")]))
         self.assertEqual(status, 401)
 
@@ -74,7 +69,6 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(status, 200)
 
     def test_docs_are_off_unless_enabled(self):
-        # Swagger UI không khoá được bằng API key nên mặc định phải tắt.
         self.assertFalse(main.ENABLE_DOCS)
         for path in ("/docs", "/redoc", "/openapi.json"):
             with self.subTest(path=path):
@@ -94,7 +88,6 @@ class RequestLimitTest(unittest.TestCase):
         self.assertEqual(res.status_code, 413)
 
     def test_chunked_body_cannot_slip_past_the_limit(self):
-        # Không khai Content-Length: bản trước chỉ nhìn header nên bỏ lọt.
         def stream():
             yield b'{"voice":"","durationSec":10,"segments":[{"id":1,"start":0,"end":5,"vi":"'
             for _ in range(main.MAX_BODY_BYTES // 100_000 + 5):
@@ -106,10 +99,10 @@ class RequestLimitTest(unittest.TestCase):
 
     def test_malformed_job_id_index_and_extension_are_refused(self):
         for path in (
-            "/audio/khong-hop-le/w0.opus",      # job id không đúng dạng
-            f"/audio/{'a' * 16}/w0.exe",        # đuôi file không cho phép
-            f"/audio/{'a' * 16}/w-1.opus",      # chỉ số âm
-            f"/audio/{'a' * 16}/w999999.opus",  # chỉ số ngoài biên
+            "/audio/khong-hop-le/w0.opus",
+            f"/audio/{'a' * 16}/w0.exe",
+            f"/audio/{'a' * 16}/w-1.opus",
+            f"/audio/{'a' * 16}/w999999.opus",
             "/api/job/..%2f",
         ):
             with self.subTest(path=path):
@@ -127,7 +120,7 @@ class JobLifecycleTest(unittest.TestCase):
     def test_rejects_jobs_when_disk_is_full(self):
         real = shutil.disk_usage
         shutil.disk_usage = lambda _p: type("U", (), {"total": 1 << 40, "used": 0, "free": 5 << 20})
-        main.ENGINE = object()  # qua được cửa kiểm tra engine, tới cửa kiểm tra đĩa
+        main.ENGINE = object()
         try:
             res = self.client.post(
                 "/api/synthesize", headers=KEY, json={**JOB_BODY, "durationSec": 600.0}
@@ -139,7 +132,7 @@ class JobLifecycleTest(unittest.TestCase):
         self.assertIn("dung lượng", res.json()["detail"])
 
     def test_rejects_jobs_while_the_engine_is_unavailable(self):
-        self.assertIsNone(main.ENGINE)  # engine chưa nạp trong test
+        self.assertIsNone(main.ENGINE)
         self.assertEqual(
             self.client.post("/api/synthesize", headers=KEY, json=JOB_BODY).status_code, 503
         )
@@ -216,8 +209,8 @@ class SynthTimeoutTest(unittest.TestCase):
         try:
             with self.assertRaises(RuntimeError):
                 main._synth_with_timeout("xin chào", main.WORK_DIR / "khong-dung.wav", "", 1.0)
-            self.assertIsNone(main.ENGINE)          # engine bị coi là hỏng
-            self.assertIn("kẹt", main.ENGINE_ERROR)  # lý do đi vào /api/health
+            self.assertIsNone(main.ENGINE)
+            self.assertIn("kẹt", main.ENGINE_ERROR)
         finally:
             main.SYNTH_TIMEOUT_SEC = original
             main.ENGINE, main.ENGINE_ERROR = None, None

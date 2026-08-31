@@ -1,13 +1,4 @@
-/**
- * Chạy background.js thật trong Node với chrome/fetch giả lập.
- *
- * Đây là phần điều phối 900 dòng chưa từng có test, và cũng là nơi mọi lỗi
- * trong dự án này phát sinh. Test dựng một job đầy đủ: dịch qua Gemini giả,
- * gửi TTS server giả, nhận cửa sổ audio dần, và kiểm những message mà content
- * script thực sự nhận được.
- *
- * Chạy: node --test tests/background.test.js
- */
+/** Chạy background.js thật trong Node với chrome/fetch giả lập. */
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -16,7 +7,7 @@ const vm = require('node:vm');
 
 const EXT = path.join(__dirname, '..', 'extension');
 
-/** Phản hồi Gemini: mọi bước đều nhận JSON trong một text part. */
+/** Phản hồi Gemini */
 function geminiReply(payload) {
   return {
     ok: true,
@@ -47,15 +38,12 @@ function audioReply(bytes = 32) {
   };
 }
 
-/**
- * Dựng môi trường service worker giả và nạp background.js vào đó.
- * `server` quyết định từng request trả về gì.
- */
+/** Dựng môi trường service worker giả và nạp background.js vào đó. */
 function loadWorker({ jobStates, audioWindows }) {
   const calls = [];
   const context = {
     console,
-    setTimeout: (fn) => setTimeout(fn, 0), // bỏ mọi khoảng chờ cho test chạy nhanh
+    setTimeout: (fn) => setTimeout(fn, 0),
     clearTimeout,
     AbortController,
     atob,
@@ -84,9 +72,6 @@ function loadWorker({ jobStates, audioWindows }) {
     if (url.includes('generativelanguage')) {
       const body = JSON.parse(options.body);
       const prompt = body.contents[0].parts[0].text;
-      // Phân biệt theo CẤU TRÚC prompt, không theo từ khoá: prompt dịch cũng
-      // nhắc "thuật ngữ" vì nó nhúng glossary vào system prompt.
-      // Mỗi câu cần dịch là một dòng "<id>\t[tối đa N âm tiết]\t<en>".
       const ids = [...prompt.matchAll(/^(\d+)\t/gm)].map((m) => Number(m[1]));
       if (!ids.length) {
         return geminiReply({
@@ -161,7 +146,6 @@ async function runJob(worker, cues, durationSec) {
   worker.context.__onConnect(port);
   port.__deliver({ type: 'START', protocol: 2, videoId: 'vid-1', durationSec, cues });
 
-  // Chờ tới khi có DONE hoặc ERROR (hoặc hết kiên nhẫn).
   for (let i = 0; i < 400; i++) {
     if (received.some((m) => m.type === 'DONE' || m.type === 'ERROR')) break;
     await new Promise((r) => setTimeout(r, 5));
@@ -201,7 +185,6 @@ test('mỗi cửa sổ server công bố đều tới content script ngay, khôn
   assert.ok(windows[0].plan, 'cửa sổ đầu phải kèm plan để dựng phụ đề');
   assert.strictEqual(windows[1].plan, undefined, 'cửa sổ sau không gửi lại plan');
 
-  // Cửa sổ đầu phải tới TRƯỚC khi job xong — đó là toàn bộ mục đích phát dần.
   const firstWindowAt = received.indexOf(windows[0]);
   const doneAt = received.findIndex((m) => m.type === 'DONE');
   assert.ok(firstWindowAt < doneAt, 'cửa sổ đầu phải tới trước DONE');
@@ -254,13 +237,11 @@ test('đóng tab khi job đang chạy sẽ yêu cầu server huỷ', async () =>
   });
   const { received, disconnect } = await runJob(worker, CUES, 20);
   assert.ok(received.some((m) => m.type === 'DONE'));
-  // Sau khi xong thì không còn gì để huỷ.
   disconnect();
   await new Promise((r) => setTimeout(r, 10));
   const deletes = worker.calls.filter((c) => c.method === 'DELETE');
   assert.strictEqual(deletes.length, 0, 'job đã xong thì không gửi DELETE');
 });
-
 
 test('content script bản cũ bị từ chối NGAY, không tiêu tiền dịch', async () => {
   const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
@@ -272,7 +253,6 @@ test('content script bản cũ bị từ chối NGAY, không tiêu tiền dịch
     onDisconnect: { addListener: () => {} },
   };
   worker.context.__onConnect(port);
-  // Bản cũ không gửi trường protocol.
   port.__deliver({ type: 'START', videoId: 'vid-1', durationSec: 20, cues: CUES });
   await new Promise((r) => setTimeout(r, 30));
 

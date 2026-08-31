@@ -1,38 +1,14 @@
-/**
- * Timeline planner — gộp cue phụ đề thành câu, gắn timestamp tuyệt đối,
- * tính hạn mức âm tiết và tạo prompt dịch học thuật theo chuyên ngành.
- *
- * Hai điểm đáng lưu ý:
- *  - viSyllablesPerSec truyền vào theo tham số (đọc từ settings, người dùng
- *    hiệu chỉnh sau khi benchmark TTS) thay vì hằng số cố định.
- *  - Prompt trả JSON dạng object {"segments":[...]} để Gemini structured
- *    output luôn có schema nhất quán giữa các bước dịch/review.
- *
- * File này chạy được ở cả hai môi trường: content script (world DOM) và
- * service worker (nạp bằng importScripts trong background.js) — nên không
- * dùng API nào ngoài JS thuần.
- */
+/** Timeline planner — gộp cue phụ đề thành câu, gắn timestamp tuyệt đối, tính hạn mức âm tiết và tạo prompt dịch học thuật theo chuyên ngành. */
 var DUB = globalThis.DUB || (globalThis.DUB = {});
 
 (function () {
   const STRETCH_MIN = 0.90;
-  // Khớp tts_engine.SPEED_MAX bên server: câu vượt khe được đọc lại bằng
-  // tốc độ native của Kokoro tối đa 1.15x trước khi phải cắt bớt.
   const STRETCH_MAX = 1.15;
-  // Khớp audio_pipeline.BORROW_GAP_SEC: khoảng thở chừa trước câu kế khi
-  // một câu mượn khoảng lặng phía sau nó.
   const BORROW_GAP_SEC = 0.08;
   const ROOMY_RATIO = 0.75;
-  // Đo trên giọng Kokoro mặc định qua 5 job thật: 3.75-3.92 âm tiết/giây.
-  // Baseline 2.6 trước đây thấp hơn thực tế ~46%, khiến hạn mức âm tiết bị
-  // cắt gần một phần ba và bản dịch bị ép súc tích vô cớ.
   const DEFAULT_RATE = 3.8;
-  // Biên tin được cho tốc độ đo về: ngoài khoảng này gần như chắc chắn là
-  // job hỏng (một câu duy nhất, audio lỗi) chứ không phải giọng đọc thật.
   const RATE_MIN = 2.0;
   const RATE_MAX = 6.0;
-  // Trọng số của số đo mới. Thấp để một bài giảng bất thường không kéo lệch
-  // hẳn cấu hình, vẫn đủ để hội tụ sau vài lần chạy.
   const RATE_ALPHA = 0.3;
 
   const VI_MARKS = /[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]/i;
@@ -51,10 +27,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
   const countEnWords = (s) => (String(s).match(/[A-Za-z][A-Za-z'-]*/g) || []).length;
 
-  /**
-   * Gộp cue (cắt theo dòng hiển thị) thành câu hoàn chỉnh, giữ ánh xạ vị trí
-   * ký tự -> mốc thời gian để câu bắt đầu giữa cue vẫn có timestamp hợp lý.
-   */
+  /** Gộp cue (cắt theo dòng hiển thị) thành câu hoàn chỉnh, giữ ánh xạ vị trí ký tự -> mốc thời gian để câu bắt đầu giữa cue vẫn có timestamp hợp lý. */
   function cuesToSentences(cues) {
     let flat = '';
     const charStart = [];
@@ -118,9 +91,6 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     const sentences = cuesToSentences(cues);
     const segments = sentences.map((s, i) => {
       const slot = +(s.end - s.start).toFixed(3);
-      // Server cho câu mượn khoảng lặng tới sát câu kế, nên hạn mức trên
-      // tính theo khe thật đó — nếu vẫn tính theo [start,end] thì bản dịch
-      // bị ép ngắn hơn mức audio thực sự chứa được.
       const nextStart = i + 1 < sentences.length ? sentences[i + 1].start : duration;
       const usable = Math.max(slot, nextStart - BORROW_GAP_SEC - s.start);
       const max = Math.max(1, Math.floor(usable * rate * stretchMax));
@@ -223,7 +193,6 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       const key = source.toLocaleLowerCase('en');
       if (!source || !rawTarget || seen.has(key)) continue;
       seen.add(key);
-      // Schema thiếu action không đủ căn cứ để tự dịch thuật ngữ chuyên ngành.
       const action = term.action === 'translate' ? 'translate' : 'keep';
       const target = action === 'keep' ? source : rawTarget;
       terms.push({ source, target, action });
@@ -374,7 +343,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     return 'GLOSSARY CẦN KIỂM ĐỊNH:\n' + JSON.stringify(terminology || { subject: '', terms: [] });
   }
 
-  /** Trích JSON khoan dung: bỏ code fence, tìm khối {...} hoặc [...] đầu tiên hợp lệ. */
+  /** Trích JSON khoan dung */
   function extractJson(text) {
     let s = String(text).trim();
     s = s.replace(/^```[a-z]*\n?/i, '').replace(/```\s*$/i, '').trim();
@@ -386,7 +355,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     throw new Error('Không trích được JSON từ phản hồi: ' + s.slice(0, 200));
   }
 
-  /** Chuẩn hoá phản hồi model về mảng {id, vi} — chấp nhận cả {segments:[...]} lẫn [...] trần. */
+  /** Chuẩn hoá phản hồi model về mảng {id, vi} — chấp nhận cả {segments */
   function parseTranslationResponse(text) {
     const data = extractJson(text);
     const arr = Array.isArray(data) ? data : (data && Array.isArray(data.segments) ? data.segments : null);
@@ -396,12 +365,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       .map((r) => ({ id: +r.id, vi: r.vi }));
   }
 
-  /**
-   * Glossary có thực sự dùng được không. Model đôi khi trả JSON hợp lệ nhưng
-   * rỗng ruột (subject "" và không mục nào) — parse không ném lỗi nên nếu
-   * không chốt ở đây thì cả bài giảng được dịch không có thuật ngữ nào, mà
-   * người dùng không biết vì sao lần này chất lượng khác lần trước.
-   */
+  /** Glossary có thực sự dùng được không. */
   function isUsableTerminology(terminology) {
     return Boolean(
       terminology
@@ -412,11 +376,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     );
   }
 
-  /**
-   * Tốc độ đọc dùng cho lần sau, từ tốc độ server đo được của job vừa xong.
-   * Làm tròn 0.1 vì rate nằm trong khoá cache: nhích vài phần nghìn mỗi lần
-   * chạy sẽ khiến mọi bài đã lồng tiếng phải làm lại từ đầu.
-   */
+  /** Tốc độ đọc dùng cho lần sau, từ tốc độ server đo được của job vừa xong. */
   function nextCalibratedRate(current, measured) {
     const now = Number(current) || DEFAULT_RATE;
     const seen = Number(measured);
@@ -433,7 +393,6 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       if (vi === undefined) return { id: g.id, start: g.start, slot: g.slot, vi: null, status: 'THIẾU' };
       const syl = countViSyllables(vi);
       const need = syl / rate;
-      // usableSlot vắng mặt ở plan dựng bởi bản cũ còn trong cache.
       const usable = g.usableSlot || g.slot;
       const ratio = usable > 0 ? need / usable : 99;
       let status = 'ok';

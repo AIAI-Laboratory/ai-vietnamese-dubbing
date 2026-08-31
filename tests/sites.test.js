@@ -1,4 +1,4 @@
-/** Chạy: node --test tests/sites.test.js */
+/** Chạy */
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -12,7 +12,7 @@ function loadAt(href) {
   const url = new URL(href);
   const context = {
     console,
-    URLSearchParams, // có sẵn trong trình duyệt, phải cấp cho sandbox vm
+    URLSearchParams,
     location: { href, pathname: url.pathname, search: url.search },
   };
   context.globalThis = context;
@@ -68,14 +68,12 @@ test('dòng transcript thành cue liên tục, dòng cuối kéo tới hết vid
   const cues = sites.segmentsToCues(
     [
       { time: '0:10', text: 'second line' },
-      { time: '0:00', text: 'first line' }, // sai thứ tự -> phải tự sắp xếp
+      { time: '0:00', text: 'first line' },
       { time: 'xx', text: 'rác' },
-      { time: '0:20', text: '   ' }, // rỗng -> bỏ
+      { time: '0:20', text: '   ' },
     ],
     45,
   );
-  // JSON hoá trước khi so: object sinh trong vm có prototype của realm khác,
-  // deepStrictEqual sẽ báo lệch dù nội dung y hệt.
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(cues)),
     [

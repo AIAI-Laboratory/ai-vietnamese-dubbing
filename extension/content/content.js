@@ -1,52 +1,24 @@
-/**
- * Content script — chạy trên trang video được lib/sites.js hỗ trợ (Coursera,
- * YouTube). Mọi chi tiết riêng của từng trang nằm trong adapter đó, file này
- * chỉ dùng interface chung.
- *
- * Luồng: bấm nút Dub -> đọc phụ đề tiếng Anh (adapter) -> kiểm tra cache
- * (lib/cache.js) -> nếu chưa có, mở Port tới service worker (background.js)
- * chạy job dịch qua Gemini API + tổng hợp giọng (TTS server local, server/) ->
- * nhận về MỘT file audio dài bằng video -> phát bằng thẻ <audio> neo cứng
- * currentTime = video.currentTime. Tua/pause/đổi tốc độ chỉ là một phép gán,
- * luôn đúng ngay lập tức dù tua tới đâu, không cần buffer.
- */
+/** Content script — chạy trên trang video được lib/sites.js hỗ trợ (Coursera, YouTube). */
 (function () {
-  // Content script chạy ở isolated world: muốn thấy cảnh báo này trong
-  // DevTools thì chọn context của extension ở dropdown "top".
   const warn = (...args) => console.warn("[LDUB]", ...args);
 
-  // Phải khớp PROTOCOL_VERSION trong background.js. Tải lại extension không
-  // thay content script trong tab đang mở, nên số này là cách duy nhất để
-  // phát hiện bản cũ đang chạy — xem chi tiết ở background.js.
   const PROTOCOL_VERSION = 2;
   console.log(`[LDUB] content script v${PROTOCOL_VERSION} đã nạp`);
 
-  // SVG nhúng thẳng (không dùng sprite <symbol> dùng chung như trang Cài đặt)
-  // — tiêm sprite id cố định vào DOM của Coursera dễ đụng id trùng với chính
-  // trang đó. Nguồn: Lucide (MIT, github.com/lucide-icons/lucide), giữ
-  // nguyên path gốc. stroke="currentColor" ăn theo màu chữ nút.
   const ICON_MIC =
     '<svg class="ldub-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>';
   const ICON_PLAY =
     '<svg class="ldub-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>';
 
   const DEFAULT_SETTINGS = {
-    subtitlesOn: false, // chỉ nghe, không hiện phụ đề — bật lại ở popup icon extension
-    subtitlesEnOn: true, // phụ đề tiếng Anh (gốc) — bật mặc định cùng tiếng Việt
-    // Mặc định theo chuẩn Netflix/BBC: chữ trắng nền đen bán trong suốt
-    // (tương phản trắng/đen ~21:1, vượt xa mức tối thiểu WCAG 4.5:1), đặt
-    // dưới video, cỡ vừa. Đổi trong popup icon extension.
-    subtitlePosition: "bottom", // 'bottom' | 'top'
-    subtitleSize: "medium", // 'small' | 'medium' | 'large'
-    subtitleColor: "white-black", // 'white-black' | 'yellow-black' | 'black-white' — 3 preset của Netflix
-    // Lệch tay do người dùng KÉO phụ đề tới vị trí họ muốn — cộng thêm vào vị
-    // trí mặc định tính từ subtitlePosition, không thay thế nó (đổi preset
-    // Trên/Dưới thì lệch tay vẫn giữ nguyên, tính từ mốc mới).
+    subtitlesOn: false,
+    subtitlesEnOn: true,
+    subtitlePosition: "bottom",
+    subtitleSize: "medium",
+    subtitleColor: "white-black",
     subtitleOffsetX: 0,
     subtitleOffsetY: 0,
     dubVolume: 1.0,
-    // Hệ số nhân lên đường bao ducking do server tính: 1.0 = giữ nhạc nền
-    // và tiếng động của video ở mức server đề xuất, 0 = mute hẳn như bản cũ.
     bedVolume: 1.0,
     serverUrl: "http://127.0.0.1:18765",
     serverApiKey: "",
@@ -55,10 +27,6 @@
     planVersion: "kokoro-v11",
   };
 
-  // % chiều cao video — theo nghiên cứu ngành (phụ đề chuyên nghiệp ~7-10%
-  // chiều cao khung hình ở khoảng cách xem TV); hạ xuống một chút cho màn
-  // hình laptop xem gần. "medium" khớp cỡ chữ mặc định cũ (18px trên video
-  // ~430px cao, để không đổi cảm giác quen thuộc cho người đã dùng trước đó).
   const SUBTITLE_SIZE_PCT = { small: 0.032, medium: 0.042, large: 0.056 };
 
   let video = null;
@@ -66,34 +34,26 @@
   let dubBtn = null;
   let dockObserver = null;
   let dockRetryTimer = null;
-  // Audio đến theo cửa sổ ~30s, mỗi cửa sổ một thẻ <audio> phủ đúng đoạn
-  // [startSec, endSec) của video. Nghe được ngay khi cửa sổ đầu về, phần còn
-  // lại tổng hợp trong lúc đang phát.
   let audioWindows = [];
   let activeWindow = null;
   let subtitleEl = null;
   let controlsEl = null;
   let fullscreenBound = false;
-  let currentState = "idle"; // idle | loading | ready | error
+  let currentState = "idle";
   let currentPlan = null;
   let currentTranslated = null;
   let currentSubtitles = null;
   let syncTimer = null;
-  let syncAbort = null; // gỡ listener của lần dub trước (xem startSync)
-  let mode = "dubbed"; // dubbed | original
+  let syncAbort = null;
+  let mode = "dubbed";
   let settings = { ...DEFAULT_SETTINGS };
   let voicesCache = null;
-  let truncatedIds = new Set(); // id câu server phải cắt bớt cho vừa khe
-  // Có job đang chạy hay không. Trạng thái đèn suy ra từ đây chứ không từ
-  // phần trăm tiến độ: các mốc phần trăm đổi mỗi khi thêm bước vào pipeline,
-  // và đã có lần đèn báo xanh lá lúc còn đang dịch.
+  let truncatedIds = new Set();
   let jobRunning = false;
   let duckTimer = null;
-  // Object URL sống theo vòng đời document chứ không theo phần tử: gỡ thẻ
-  // <audio> KHÔNG giải phóng blob. Không thu hồi tay thì mỗi lần lồng tiếng,
-  // đổi giọng hay điều hướng SPA để lại 5-15 MB trong tab tới khi đóng tab.
   const liveObjectUrls = new Set();
 
+  /** Object URL sống theo document, gỡ thẻ <audio> không giải phóng blob — phải thu hồi tay. */
   function trackedObjectUrl(blob) {
     const url = URL.createObjectURL(blob);
     liveObjectUrls.add(url);
@@ -110,12 +70,8 @@
     for (const url of liveObjectUrls) URL.revokeObjectURL(url);
     liveObjectUrls.clear();
   }
-  const previewAudioCache = new Map(); // voice -> {base64, mime} — nghe lại không tổng hợp lại
+  const previewAudioCache = new Map();
 
-  // Adapter của trang đang mở. KHÔNG chốt một lần lúc nạp: content script chỉ
-  // được Chrome tiêm khi tải trang, còn YouTube/Coursera điều hướng kiểu SPA —
-  // vào trang chủ rồi bấm vào video thì URL đổi mà script vẫn là script cũ.
-  // Vì vậy manifest khớp cả site, và adapter được tính lại mỗi lần URL đổi.
   let site = null;
   if (!DUB.sites) {
     warn("lib/sites.js CHƯA nạp — kiểm tra content_scripts.js trong manifest.json");
@@ -159,11 +115,6 @@
     };
   }
 
-  // -------------------------------------------------------------------------
-  // Tìm video + theo dõi điều hướng SPA (Coursera lẫn YouTube không phát sự
-  // kiện điều hướng công khai nên poll URL nhẹ nhàng mỗi giây).
-  // -------------------------------------------------------------------------
-
   function findVideo() {
     const vids = [...document.querySelectorAll("video")];
     return vids.find((v) => v.duration > 0) || vids[0] || null;
@@ -204,9 +155,6 @@
       overlay.remove();
       overlay = null;
     }
-    // Phụ đề và bảng điều khiển gắn thẳng vào body chứ không nằm trong
-    // overlay, nên trước đây chúng ở lại màn hình sau khi rời trang video —
-    // thấy rõ khi bấm nhanh sang bài tiếp theo.
     if (subtitleEl) {
       subtitleEl.remove();
       subtitleEl = null;
@@ -225,22 +173,14 @@
       video.muted = false;
       video.volume = 1;
     } catch (e) {
-      /* video có thể đã bị gỡ khỏi DOM */
     }
   }
 
-  // Khởi tạo bằng URL hiện tại: để rỗng thì tick đầu tiên tưởng là vừa đổi
-  // trang và dọn sạch overlay vừa gắn xong.
   let lastPath = location.pathname + location.search;
   let navTimer = null;
   let orphaned = false;
 
-  /**
-   * Reload extension trong lúc trang đang mở sẽ để lại content script này
-   * "mồ côi": chrome.runtime của nó không còn dùng được nữa. Không nhận ra
-   * thì vòng lặp dưới đây gọi sendMessage mỗi giây và ném "Extension context
-   * invalidated" mãi mãi.
-   */
+  /** Reload extension trong lúc trang đang mở sẽ để lại content script này "mồ côi" */
   function contextGone() {
     try {
       return !chrome.runtime || !chrome.runtime.id;
@@ -272,10 +212,6 @@
         shutdownOrphan();
         return;
       }
-      // Trang là SPA — <video> có thể render SAU thời điểm content script
-      // chạy (document_idle), nên phải thử lại đều đặn, không chỉ khi URL
-      // đổi. Đổi URL thì dọn dẹp overlay/audio cũ trước khi thử lại.
-      // YouTube giữ nguyên /watch khi đổi video, chỉ ?v= đổi — so cả query.
       const here = location.pathname + location.search;
       if (here !== lastPath) {
         lastPath = here;
@@ -287,10 +223,10 @@
   }
 
   async function init() {
-    if (!site) return; // refreshSite đã log lý do
+    if (!site) return;
 
     const v = findVideo();
-    if (!v || v === video) return; // chưa có video, hoặc đã gắn overlay cho đúng video này rồi
+    if (!v || v === video) return;
     video = v;
     try {
       await loadSettings();
@@ -306,18 +242,7 @@
     injectOverlay();
   }
 
-  // -------------------------------------------------------------------------
-  // UI nổi trên video — dùng position:fixed tính theo getBoundingClientRect
-  // của video, KHÔNG chèn vào cây DOM của Coursera để tránh phá layout player.
-  // -------------------------------------------------------------------------
-
-  /**
-   * Nơi gắn các phần tử nổi của mình.
-   *
-   * Khi trình duyệt vào toàn màn hình, nó CHỈ vẽ phần tử fullscreen và con
-   * cháu của nó — mọi thứ khác trong body biến mất, kể cả phụ đề của mình.
-   * Nên phải chuyển chúng vào bên trong phần tử đang fullscreen.
-   */
+  /** Nơi gắn phần tử nổi: toàn màn hình chỉ vẽ phần tử fullscreen và con cháu của nó. */
   function floatingHost() {
     return document.fullscreenElement || document.webkitFullscreenElement || document.body;
   }
@@ -325,12 +250,9 @@
   /** Đưa phụ đề, bảng điều khiển và nút nổi về đúng nơi cần gắn. */
   function remountFloating() {
     const host = floatingHost();
-    // controlsEl nằm trong overlay nên đi theo overlay, không chuyển riêng.
     for (const el of [overlay, subtitleEl]) {
       if (el && el.parentElement !== host) host.appendChild(el);
     }
-    // Nút đã cắm vào thanh điều khiển của trang thì để yên: thanh đó nằm sẵn
-    // trong phần tử fullscreen rồi.
     if (dubBtn && !dubBtn.classList.contains("ldub-btn-docked")
         && dubBtn.parentElement !== host) {
       host.appendChild(dubBtn);
@@ -356,7 +278,7 @@
     dubBtn.title = "Thuyết minh tiếng Việt";
     dubBtn.innerHTML = `${ICON_MIC}<span class="ldub-btn-text">Thuyết minh tiếng Việt</span>`;
     dubBtn.addEventListener("click", onDubClick);
-    document.body.appendChild(dubBtn); // vị trí nổi mặc định/dự phòng — xem tryDockToControlBar()
+    document.body.appendChild(dubBtn);
 
     if (!fullscreenBound) {
       fullscreenBound = true;
@@ -380,21 +302,6 @@
     tryLoadFromCache();
   }
 
-  // -------------------------------------------------------------------------
-  // Gắn nút vào thanh điều khiển thật của trình phát (cạnh nút tốc độ "1x"/
-  // "2x"...), theo đúng vị trí người dùng chỉ định — thay vì nổi rời trên
-  // video. RỦI RO THẬT: thanh điều khiển này gần như chắc chắn do framework
-  // (React) tự vẽ lại (timestamp nhảy mỗi giây), có thể TỰ XOÁ node của mình
-  // ở lần vẽ lại kế tiếp vì nó không nằm trong cây mà framework quản lý.
-  //
-  // Selector neo do adapter của từng trang cung cấp (lib/sites.js) — ưu tiên
-  // aria-label/class ổn định thay vì tên class do build tool sinh ra, thứ đổi
-  // sau mỗi lần trang deploy lại.
-  //
-  // Thất bại (không tìm thấy, hoặc bị xoá liên tục) thì tự rơi về vị trí nổi
-  // sẵn có (đã kiểm chứng hoạt động) — không bao giờ để mất nút hẳn.
-  // -------------------------------------------------------------------------
-
   const SPEED_BTN_TEXT_RE = /^\d+(\.\d+)?x$/i; // dự phòng nếu trang đổi aria-label
 
   function findSpeedControlNear(v) {
@@ -408,8 +315,6 @@
       const text = (el.textContent || "").trim();
       if (!SPEED_BTN_TEXT_RE.test(text)) continue;
       const r = el.getBoundingClientRect();
-      // Phải nằm gần video (dưới hoặc ngang mép dưới) — tránh bắt nhầm "2x"
-      // xuất hiện ở chỗ khác trên trang.
       if (r.top < vr.top - 20 || r.top > vr.bottom + 80) continue;
       if (r.left < vr.left - 20 || r.right > vr.right + 20) continue;
       btn = el;
@@ -431,16 +336,16 @@
         return;
       }
 
-      row.appendChild(dubBtn); // cuối hàng — ngoài cùng bên phải, sau nút Toàn màn hình
+      row.appendChild(dubBtn);
       dubBtn.classList.remove("ldub-btn-floating");
       dubBtn.classList.add("ldub-btn-docked");
-      dubBtn.style.position = ""; // bỏ fixed — chạy theo flow thật của thanh điều khiển
+      dubBtn.style.position = "";
       dubBtn.style.top = dubBtn.style.left = dubBtn.style.bottom = "";
-      positionOverlay(); // panel bám theo vị trí mới của nút
+      positionOverlay();
 
       if (dockObserver) dockObserver.disconnect();
       dockObserver = new MutationObserver(() => {
-        if (!row.contains(dubBtn)) tryDockToControlBar(); // bị framework vẽ lại đè mất — gắn lại ngay
+        if (!row.contains(dubBtn)) tryDockToControlBar();
       });
       dockObserver.observe(row, { childList: true });
     } catch (e) {
@@ -452,10 +357,6 @@
   }
 
   function scheduleDockRetry() {
-    // Thanh điều khiển có thể chưa render xong lúc nút Dub được gắn
-    // (document_idle chạy sớm hơn React thuỷ hợp). Thử lại vài lần trong vài
-    // giây đầu rồi bỏ cuộc, giữ vị trí nổi — không thử vô hạn, tránh tốn CPU
-    // nếu trang đổi hẳn cấu trúc UI khác.
     clearTimeout(dockRetryTimer);
     let attempts = 0;
     const tick = () => {
@@ -474,10 +375,6 @@
     if (!video || !overlay || !dubBtn) return;
     const r = video.getBoundingClientRect();
     if (!dubBtn.classList.contains("ldub-btn-docked")) {
-      // Vị trí nổi (mặc định/dự phòng khi không gắn được vào thanh điều
-      // khiển): neo gần đáy-phải video, sát khu vực thanh điều khiển/tua của
-      // trình phát thay vì góc trên (trước đây đụng nút "Download this
-      // video" của Coursera).
       const btnClearance = Math.max(64, r.height * 0.11);
       dubBtn.style.position = "fixed";
       dubBtn.style.top = "auto";
@@ -485,8 +382,6 @@
         Math.round(window.innerHeight - r.bottom + btnClearance) + "px";
       dubBtn.style.left = r.left + r.width - dubBtn.offsetWidth - 12 + "px";
     }
-    // Panel luôn bám theo vị trí THẬT của nút (đọc getBoundingClientRect trực
-    // tiếp) — đúng cả khi nút đang nổi lẫn khi đã gắn trong thanh điều khiển.
     const br = dubBtn.getBoundingClientRect();
     overlay.style.top = "auto";
     overlay.style.left = "auto";
@@ -503,13 +398,6 @@
         ) + "px";
       subtitleEl.dataset.color = settings.subtitleColor || "white-black";
 
-      // "bottom" neo từ đáy video đi lên — box cao thêm khi bật cả 2 dòng
-      // Anh+Việt vẫn tự đẩy lên đúng, không cần đoán chiều cao box trước.
-      // Clearance co giãn theo cỡ video: người dùng Coursera từng thấy phụ
-      // đề đè lên thanh điều khiển của trình phát ở mức cố định 64px — nới
-      // rộng + cho đổi sang "Trên" trong popup, hoặc tự KÉO ô phụ đề, nếu
-      // skin trình phát khác vẫn còn che (không có DOM Coursera thật để
-      // test hết mọi trường hợp).
       if (settings.subtitlePosition === "top") {
         subtitleEl.style.top =
           Math.round(r.top + Math.max(16, r.height * 0.03)) + "px";
@@ -520,19 +408,11 @@
           Math.round(window.innerHeight - r.bottom + clearance) + "px";
         subtitleEl.style.top = "auto";
       }
-      // Lệch tay do người dùng tự kéo — cộng thêm vào vị trí mặc định vừa
-      // tính, không đụng top/bottom ở trên (transform không ảnh hưởng layout
-      // nên video/scroll đổi kích thước vẫn tính lại đúng gốc trước khi cộng lệch).
       subtitleEl.style.transform = `translate(${settings.subtitleOffsetX || 0}px, ${settings.subtitleOffsetY || 0}px)`;
     }
   }
 
-  // ------------------------------------------------------------------------
-  // Kéo phụ đề tới vị trí muốn — không phải mọi giao diện Coursera đều đoán
-  // đúng bằng preset Trên/Dưới, nên cho tự kéo là chắc chắn nhất. Nhấp đúp
-  // để đặt lại vị trí mặc định.
-  // ------------------------------------------------------------------------
-  let subtitleDrag = null; // {startX, startY, startOffX, startOffY} khi đang kéo
+  let subtitleDrag = null;
 
   function initSubtitleDrag() {
     subtitleEl.addEventListener("pointerdown", (e) => {
@@ -572,13 +452,7 @@
     });
   }
 
-  /** Nút chỉ còn icon (xem .ldub-btn trong CSS) — text vẫn cập nhật trong DOM
-   * (đọc được bằng screen reader) và làm title, hiện khi rê chuột vào. */
-  // Chấm màu ở góc nút: nhìn là biết đang ở đâu mà không phải mở bảng.
-  //   working = đang dịch/tổng hợp, chưa nghe được gì
-  //   partial = nghe được rồi, phần sau còn đang tổng hợp
-  //   ready   = xong toàn bộ (kể cả lấy từ cache)
-  //   error   = hỏng
+  /** Nút chỉ còn icon (xem .ldub-btn trong CSS) — text vẫn cập nhật trong DOM (đọc được bằng screen reader) và làm title, hiện khi rê chuột vào. */
   const STATUS_CLASSES = [
     "ldub-status-working",
     "ldub-status-partial",
@@ -612,13 +486,8 @@
     if (pct !== undefined)
       bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
     if (note !== undefined) noteEl.textContent = note;
-    positionOverlay(); // panel đổi kích thước có thể làm overlay lệch khỏi mép phải video
+    positionOverlay();
   }
-
-  // -------------------------------------------------------------------------
-  // Cache: nếu bài này đã thuyết minh trước đó (đúng giọng), dùng lại ngay,
-  // không gọi lại API dịch / TTS server.
-  // -------------------------------------------------------------------------
 
   async function tryLoadFromCache() {
     try {
@@ -627,13 +496,8 @@
         setBtnLabel("Xem lại bản đã thuyết minh");
       }
     } catch (e) {
-      /* IndexedDB có thể bị chặn (chế độ ẩn danh) — bỏ qua, không chặn luồng chính */
     }
   }
-
-  // -------------------------------------------------------------------------
-  // Bấm nút Dub
-  // -------------------------------------------------------------------------
 
   async function onDubClick() {
     if (currentState === "ready") {
@@ -642,9 +506,6 @@
     }
     if (currentState === "loading") return;
 
-    // Livestream cho duration = Infinity, video chưa nạp xong cho NaN. Server
-    // sẽ từ chối (durationSec phải hữu hạn, <= 6 giờ) NHƯNG chỉ ở bước cuối,
-    // sau khi đã trả tiền cho toàn bộ phần dịch.
     if (!Number.isFinite(video.duration) || video.duration <= 0) {
       setPanel(
         0,
@@ -693,8 +554,6 @@
           try {
             applyWindow(msg);
           } catch (error) {
-            // Hỏng ở đây mà nuốt lỗi thì panel đứng im ở tiến độ cuối cùng,
-            // trông như treo. DONE bên dưới vẫn là lưới đỡ, nhưng phải biết.
             warn("không dựng được cửa sổ audio:", error);
             setPanel(0, "Lỗi khi nhận audio: " + (error && error.message ? error.message : error), true);
             currentState = "error";
@@ -734,12 +593,7 @@
     }
   }
 
-  /**
-   * Tiến độ job. Khi đã phát được rồi thì KHÔNG mở lại bảng: phần còn lại
-   * vẫn đang tổng hợp trong nền, nhưng người xem đang nghe rồi nên bảng tiến
-   * độ che video chẳng để làm gì — trước đây nó bật lại mỗi 700ms và nằm lì
-   * ở đó tới hết job.
-   */
+  /** Tiến độ job. */
   function reportProgress(msg) {
     const playing = currentState === "ready" && audioWindows.length > 0;
     setPanel(msg.pct, msg.note, !playing);
@@ -749,18 +603,14 @@
     }
   }
 
-  /**
-   * Bản ghi có audio phát được không. Một bản ghi cũ lưu lúc pipeline còn
-   * hỏng có thể mang windows rỗng — nhận nó làm cache hit thì đèn báo xanh lá
-   * mà không có tiếng nào.
-   */
+  /** Bản ghi có audio phát được không. */
   function hasPlayableAudio(record) {
     if (!record) return false;
     if (record.audioBase64) return true;
     return Array.isArray(record.windows) && record.windows.some((win) => win && win.base64);
   }
 
-  /** Bản ghi đầy đủ (từ cache, hoặc lúc job xong): dựng lại mọi cửa sổ. */
+  /** Bản ghi đầy đủ (từ cache, hoặc lúc job xong) */
   function applyResult(record) {
     reportTruncatedSentences(record);
     currentPlan = record.plan || null;
@@ -769,7 +619,6 @@
 
     const windows = Array.isArray(record.windows) && record.windows.length
       ? record.windows
-      // Bản cũ trong cache là một file duy nhất phủ cả video.
       : [{
         index: 0,
         startSec: 0,
@@ -778,8 +627,6 @@
         mime: record.audioMime,
         duckEnvelope: record.duckEnvelope,
       }];
-    // Dựng lại từ đầu: bỏ mọi cửa sổ đang có để không nhân đôi khi lưới đỡ
-    // DONE chạy sau khi vài cửa sổ đã về.
     pauseAllWindows();
     for (const win of audioWindows) {
       releaseObjectUrl(win.el.src);
@@ -801,11 +648,7 @@
     if (audioWindows.length === 1) finishSetup();
   }
 
-  /**
-   * Lưới đỡ cuối: DONE mang đủ mọi cửa sổ. Nếu đường phát dần không chạy
-   * (message WINDOW lỗi, hoặc extension và server lệch phiên bản) thì dựng
-   * lại từ đây thay vì để panel đứng im ở tiến độ cuối.
-   */
+  /** Lưới đỡ cuối */
   function finalizeFromDone(msg) {
     if (currentState === "ready" && audioWindows.length) return;
     const hasWindows = Array.isArray(msg.windows) && msg.windows.length;
@@ -854,7 +697,6 @@
       el.mozPreservesPitch = true;
       el.webkitPreservesPitch = true;
     } catch (e) {
-      /* trình duyệt cũ không hỗ trợ, chấp nhận đổi cao độ khi đổi tốc độ */
     }
     document.body.appendChild(el);
 
@@ -870,7 +712,7 @@
     return DUB.windows.pick(audioWindows, seconds);
   }
 
-  /** Đổi cửa sổ đang phát: dừng cái cũ, đặt đúng vị trí cho cái mới. */
+  /** Đổi cửa sổ đang phát */
   function useWindow(next) {
     if (next === activeWindow) return;
     if (activeWindow) activeWindow.el.pause();
@@ -885,24 +727,14 @@
   function syncActiveTime() {
     if (!activeWindow || !video) return;
     try {
-      // Neo tuyệt đối: vị trí trong cửa sổ = thời điểm video trừ mốc bắt đầu.
       activeWindow.el.currentTime = DUB.windows.offsetIn(activeWindow, video.currentTime);
     } catch (e) {
-      /* audio chưa sẵn sàng nhận currentTime — vòng sync 250ms sẽ chỉnh lại */
     }
   }
 
   function pauseAllWindows() {
     for (const win of audioWindows) win.el.pause();
   }
-
-  // -------------------------------------------------------------------------
-  // Ducking: hạ âm lượng video gốc theo đường bao thay vì mute hẳn, nên nhạc
-  // nền và tiếng động vẫn nghe được dưới giọng thuyết minh. Chỉ đổi độ lợi
-  // qua video.volume — KHÔNG dùng Web Audio createMediaElementSource, node đó
-  // chiếm quyền định tuyến audio của player và tắt tiếng hẳn nếu media bị
-  // tainted CORS.
-  // -------------------------------------------------------------------------
 
   function hasDuckEnvelope() {
     return audioWindows.some((win) => win.duck);
@@ -919,14 +751,12 @@
       video.muted = bed <= 0.001;
       video.volume = Math.min(1, Math.max(0, bed));
     } catch (e) {
-      /* video có thể vừa bị gỡ khỏi DOM */
     }
   }
 
   function startDucking() {
     stopDucking();
     if (!hasDuckEnvelope()) return;
-    // 50 ms một bước: bước độ lợi đủ nhỏ để không nghe ra tiếng rít khi đổi.
     duckTimer = setInterval(applyBedVolume, 50);
   }
 
@@ -937,11 +767,7 @@
     }
   }
 
-  /**
-   * Server cắt bớt câu nào không nhét vừa khe thì báo lại qua
-   * overflowSegmentIds. Không hiện ra thì người dùng nghe câu cụt mà tưởng
-   * bản dịch vốn thế.
-   */
+  /** Server cắt bớt câu nào không nhét vừa khe thì báo lại qua overflowSegmentIds. */
   function reportTruncatedSentences(record) {
     const cut = Array.isArray(record.overflowSegmentIds) ? record.overflowSegmentIds : [];
     truncatedIds = new Set(cut);
@@ -966,17 +792,8 @@
     return new Blob([bytes], { type: mime });
   }
 
-  // -------------------------------------------------------------------------
-  // Đồng bộ — neo cứng: gán currentTime theo video, không cộng dồn thời
-  // lượng segment nào cả nên tua tới đâu cũng đúng ngay, không cần buffer.
-  // -------------------------------------------------------------------------
-
-  // Lệch dưới ngưỡng này coi như khớp — không chỉnh gì, tránh rung liên tục.
   const SYNC_DEADBAND_SEC = 0.04;
-  // Lệch trên ngưỡng này mới tua cứng (nghe rõ chỗ cắt). Dưới nó chỉnh bằng
-  // playbackRate để tai không nhận ra.
   const SYNC_HARD_SEC = 0.3;
-  // Biên chỉnh tốc độ mềm. 5% với preservesPitch=true là không nghe ra.
   const SYNC_RATE_TRIM = 0.05;
 
   function hardResync() {
@@ -991,8 +808,6 @@
   }
 
   function startSync() {
-    // startSync() chạy lại mỗi lần đổi giọng. Không gỡ listener cũ thì handler
-    // chồng lên nhau, mỗi sự kiện tua chạy nhiều lần và audio bị giật.
     if (syncAbort) syncAbort.abort();
     syncAbort = new AbortController();
     const on = (target, ev, fn) =>
@@ -1007,16 +822,12 @@
       if (activeWindow) activeWindow.el.playbackRate = video.playbackRate;
     });
 
-    // Tua: DỪNG audio trước rồi mới nhảy, và chỉ phát lại ở 'seeked' khi video
-    // đã chốt vị trí cuối. Để audio chạy tiếp trong lúc video còn đang seek thì
-    // nó đọc trước hình rồi bị kéo giật ngược — đúng cảm giác "tua không mượt".
     on(video, "seeking", pauseAllWindows);
     on(video, "seeked", () => {
       hardResync();
       resumeIfPlaying();
     });
 
-    // Video buffer giữa chừng — im lặng chờ thay vì đọc tiếp một mình.
     on(video, "waiting", pauseAllWindows);
     on(video, "playing", () => {
       hardResync();
@@ -1033,19 +844,14 @@
     updateSubtitle();
     if (video.paused || video.seeking || mode === "original") return;
 
-    // Qua ranh giới cửa sổ (hoặc vừa tua tới đoạn đã tổng hợp xong) thì đổi
-    // thẻ audio trước, tick sau mới chỉnh trôi.
     const wanted = windowAt(video.currentTime);
     if (wanted !== activeWindow) {
       useWindow(wanted);
       return;
     }
-    // Chưa có cửa sổ nào phủ mốc này: phần đó còn đang tổng hợp.
     if (!activeWindow) return;
 
     const el = activeWindow.el;
-    // Lưới an toàn: 'waiting' đã pause audio nhưng 'playing' không phải lúc nào
-    // cũng bắn (đổi tab, player tự phục hồi) — tự phát lại thay vì đứng im.
     if (el.paused) {
       el.play().catch(() => {});
       return;
@@ -1058,8 +864,6 @@
       syncActiveTime();
       el.playbackRate = base;
     } else if (Math.abs(drift) > SYNC_DEADBAND_SEC) {
-      // Kéo audio về đúng chỗ bằng cách đi nhanh/chậm hơn vài phần trăm thay vì
-      // tua cứng — không cắt tiếng giữa câu.
       const trim = Math.max(
         -SYNC_RATE_TRIM,
         Math.min(SYNC_RATE_TRIM, drift * 0.5),
@@ -1088,8 +892,6 @@
     subtitleEl.innerHTML = "";
     const box = document.createElement("span");
     box.className = "ldub-sub-box";
-    // Tiếng Anh (gốc) nhỏ hơn, mờ hơn — phụ, đọc lướt qua. Tiếng Việt
-    // (bản dịch, mục đích chính của extension) đậm và to hơn.
     if (en) {
       const l = document.createElement("span");
       l.className = "ldub-sub-line ldub-sub-en";
@@ -1105,10 +907,6 @@
     subtitleEl.appendChild(box);
     subtitleEl.hidden = false;
   }
-
-  // -------------------------------------------------------------------------
-  // Bảng điều khiển: Gốc / Thuyết minh, phụ đề, âm lượng, đổi giọng.
-  // -------------------------------------------------------------------------
 
   function injectControls() {
     if (controlsEl) controlsEl.remove();
@@ -1164,8 +962,6 @@
       return;
     }
 
-    // Chỉ đổi trạng thái disabled/mờ đi khi đang chờ — giữ nguyên icon SVG
-    // bên trong nút (không đụng innerHTML/textContent của nút này).
     btn.disabled = true;
     hint.textContent = "Đang tổng hợp câu mẫu...";
     try {
@@ -1243,10 +1039,6 @@
     updateSubtitle();
   }
 
-  // Hai chế độ: Gốc (mute thuyết minh, trả âm video về nguyên) hoặc Thuyết
-  // minh. Ở chế độ Thuyết minh, video gốc được hạ theo đường bao ducking để
-  // giữ nhạc nền; không có đường bao (bản cũ trong cache, hoặc người dùng đặt
-  // bedVolume = 0) thì mute hẳn như trước.
   function applyVolumeForMode() {
     if (mode === "original") {
       stopDucking();
@@ -1272,8 +1064,6 @@
     setPanel(5, "Đang đổi giọng...", true);
     const videoId = videoIdFromUrl();
     const port = chrome.runtime.connect({ name: "dub-job" });
-    // Giọng mới thay hẳn audio cũ: bỏ mọi cửa sổ đang có rồi nhận cửa sổ mới
-    // theo đúng cơ chế phát dần như lần lồng tiếng đầu.
     let replaced = false;
     port.onMessage.addListener((msg) => {
       if (msg.type === "PROGRESS") reportProgress(msg);
@@ -1291,7 +1081,7 @@
         }
         applyWindow(msg);
       } else if (msg.type === "DONE") {
-        if (!replaced) finalizeFromDone(msg); // không cửa sổ nào tới được
+        if (!replaced) finalizeFromDone(msg);
         DUB.cache
           .put(cacheKeyParts(videoId, voice), {
             videoId,
@@ -1315,8 +1105,6 @@
       voice,
     });
   }
-
-  // -------------------------------------------------------------------------
 
   watchNavigation();
   init();

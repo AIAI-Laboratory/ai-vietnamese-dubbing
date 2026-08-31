@@ -1,21 +1,4 @@
-/**
- * Trang Cài đặt — CHỈ cấu hình Gemini API và giọng đọc (TTS server + giọng +
- * hiệu chỉnh đồng bộ). Âm lượng, phụ đề (song ngữ/vị trí/cỡ/màu) và cache
- * chỉnh trong popup icon extension — xem popup/popup.js — vì đó là những
- * thứ người dùng muốn đổi nhanh, không phải cấu hình một lần rồi để đó như
- * Gemini API key.
- *
- * Lưu vào chrome.storage.local dưới key "settings". QUAN TRỌNG: settings là
- * MỘT object dùng chung với popup.js. save() ở đây phải đọc bản hiện có rồi
- * chỉ ghi đè đúng các trường trang này quản — ghi nguyên object mới từ đầu
- * (như code cũ) sẽ xoá mất mọi thứ popup.js vừa lưu.
- *
- * Chỉ hai lời gọi mạng: API dịch (mục 1, bắt buộc, người dùng tự cấu hình)
- * và TTS server local (mục 2, chạy trên chính máy này — xem server/README.md).
- *
- * Gemini API dùng endpoint chính thức đã khai báo sẵn trong manifest; không
- * cần xin optional_host_permissions hay nhập Base URL.
- */
+/** Trang Cài đặt — CHỈ cấu hình Gemini API và giọng đọc (TTS server + giọng + hiệu chỉnh đồng bộ). */
 
 const DEFAULTS = {
   geminiApiKey: "",
@@ -30,13 +13,6 @@ const DEFAULTS = {
 };
 
 const $ = (id) => document.getElementById(id);
-
-// ---------------------------------------------------------------------------
-// Giao diện sáng/tối — lưu vào localStorage (KHÔNG chrome.storage.local):
-// cần đọc được đồng bộ ngay trong script chặn ở <head>, trước khi CSS áp
-// dụng, mới tránh được việc nhấp nháy sáng->tối. Cùng origin extension nên
-// popup.html đọc lại đúng giá trị này.
-// ---------------------------------------------------------------------------
 
 const THEME_KEY = "ldub-theme";
 
@@ -55,14 +31,12 @@ function applyTheme(choice) {
     try {
       localStorage.removeItem(THEME_KEY);
     } catch (e) {
-      /* private mode — chấp nhận không nhớ được */
     }
   } else {
     document.documentElement.dataset.theme = choice;
     try {
       localStorage.setItem(THEME_KEY, choice);
     } catch (e) {
-      /* private mode — chấp nhận không nhớ được */
     }
   }
   document.querySelectorAll("#themeSwitch button").forEach((b) => {
@@ -74,12 +48,6 @@ document.querySelectorAll("#themeSwitch button").forEach((b) => {
   b.addEventListener("click", () => applyTheme(b.dataset.themeChoice));
 });
 applyTheme(currentThemeChoice());
-
-// ---------------------------------------------------------------------------
-// Tab điều hướng (sidebar) — "Dịch" / "Giọng đọc". Không lưu lựa chọn, luôn
-// mở lại ở tab đầu khi mở trang — đây chỉ là cách nhóm hiển thị, không phải
-// trạng thái cấu hình.
-// ---------------------------------------------------------------------------
 
 const TAB_META = {
   "tab-translate": {
@@ -147,17 +115,12 @@ async function load() {
   }
 
   $("viSyllablesPerSec").value = s.viSyllablesPerSec;
-  // Nhớ giá trị lúc mở trang: nếu người dùng không sửa ô này thì lúc lưu phải
-  // giữ nguyên giá trị đang có trong storage, vì mỗi job xong lại tự hiệu
-  // chỉnh nó — ghi giá trị cũ của form lên là xoá mất kết quả hiệu chỉnh.
   loadedSyllableRate = String(s.viSyllablesPerSec);
 
-  onCheckServer(); // tự kiểm tra ngay khi mở trang, không bắt bấm tay
+  onCheckServer();
 }
 
-/** Đọc bản settings hiện có rồi chỉ ghi đè các trường trang này quản — không
- * tự bịa nguyên object mới, sẽ xoá mất phần popup.js đang giữ (âm lượng,
- * phụ đề, cache...). */
+/** Đọc bản settings hiện có rồi chỉ ghi đè các trường trang này quản — không tự bịa nguyên object mới, sẽ xoá mất phần popup.js đang giữ (âm lượng, phụ đề, cache...). */
 async function save() {
   const stored = await chrome.storage.local.get("settings");
   const settings = {
@@ -234,9 +197,6 @@ async function onCheckServer() {
     serverApiKey,
   });
   if (!res.ok) {
-    // res.error là network error (server chưa chạy/URL sai) hoặc HTTP lỗi
-    // thật (buildErrorDetail đã rút gọn) — 401 nghĩa là thiếu/sai API key,
-    // không phải "server chưa chạy" như thông báo chung chung trước đây.
     const is401 = /HTTP 401/.test(res.error || "");
     setStatus(
       status,
@@ -298,9 +258,7 @@ async function onLoadVoices() {
   setStatus(status, `Tìm thấy ${res.voices.length} giọng.`, true);
 }
 
-// Nghe thử theo giọng — cache lại kết quả để bấm lại cùng giọng phát ngay,
-// không tổng hợp lại (đổi giọng khác vẫn phải chờ tổng hợp thật lần đầu).
-const previewCache = new Map(); // voice -> {base64, mime}
+const previewCache = new Map();
 
 function playPreviewBase64(base64, mime) {
   const bytes = atob(base64);
@@ -309,8 +267,6 @@ function playPreviewBase64(base64, mime) {
   const blob = new Blob([arr], { type: mime || "audio/wav" });
   const audio = $("previewAudio");
   audio.hidden = false;
-  // Thu hồi blob của lần nghe trước: object URL sống theo document, gán src
-  // mới không giải phóng cái cũ, nghe thử nhiều giọng là tích luỹ trong trang.
   if (audio.dataset.blobUrl) URL.revokeObjectURL(audio.dataset.blobUrl);
   const url = URL.createObjectURL(blob);
   audio.dataset.blobUrl = url;

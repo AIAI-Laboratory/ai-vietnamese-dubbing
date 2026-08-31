@@ -1,27 +1,5 @@
-"""
-TTS server cho Local AI Vietnamese Dubbing (Python/FastAPI) — chỉ API,
-KHÔNG có UI/dashboard. Swagger UI tự sinh sẵn tại GET /docs — bấm nút
-"Authorize" (góc trên phải), dán X-API-Key, mọi request "Try it out" tự
-gắn kèm.
-
-  GET  /api/health              -> {"ok","status":"loading"|"ready"|"error","model","error"}
-  GET  /api/voices              -> {"voices":[{"id","label"}]} (503 nếu đang loading)
-  POST /api/preview             body {text,voice} -> file WAV
-  POST /api/synthesize          body {voice,durationSec,segments:[{id,start,end,vi}]} -> {"jobId"}
-  GET  /api/job/{jobId}         -> {"status","progress","windows":[{index,startSec,endSec,url,duckEnvelope}],...}
-  GET  /audio/{jobId}/w{i}.{ext} -> audio của một cửa sổ
-
-Audio trả về theo CỬA SỔ ~30 giây chứ không phải một file dài bằng video:
-cửa sổ đầu sẵn sàng sau vài giây nên người xem nghe được gần như ngay, phần
-còn lại tổng hợp trong lúc đang phát. Ranh giới cửa sổ luôn rơi đúng mốc bắt
-đầu một câu nên không câu nào bị xẻ đôi.
-
-TOÀN BỘ route trên khoá bằng header X-API-Key (xem auth.py) — BẮT BUỘC,
-không có kiểu "để trống = không khoá": server chỉ chạy qua API nên nếu
-không auth thì ai biết địa chỉ cũng gọi được, tốn CPU. Server
-từ chối khởi động luôn nếu chưa đặt API_KEY trong server/.env.
-
-Vẫn cần ffmpeg trong PATH để nén audio vừa khe và xuất Opus/MP3.
+"""TTS server cho Local AI Vietnamese Dubbing (Python/FastAPI) — chỉ API, KHÔNG có
+UI/dashboard.
 """
 
 from __future__ import annotations
@@ -42,11 +20,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
-# Windows mặc định chọn codepage ANSI (cp1252) cho stdout/stderr khi không
-# chạy trong console thật (bị redirect ra file/pipe) — tiếng Việt có dấu
-# vượt ngoài bảng mã đó, Python âm thầm escape thành "\uXXXX" thay vì in
-# UTF-8 thật. Tự cấu hình trong code cho chắc, không phụ thuộc biến môi
-# trường PYTHONIOENCODING người dùng có nhớ đặt hay không.
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -58,9 +31,6 @@ from dotenv import load_dotenv
 
 SERVER_DIR = Path(__file__).resolve().parent
 
-# Nạp server/.env TRƯỚC khi import auth.py — auth.py đọc API_KEY từ
-# os.environ ngay lúc import (module-level, và tự sys.exit nếu rỗng), load
-# muộn hơn sẽ không kịp.
 load_dotenv(SERVER_DIR / ".env")
 
 import uvicorn
@@ -77,37 +47,16 @@ from auth import require_api_key
 WORK_DIR = Path(tempfile.gettempdir()) / "local-ai-vi-dub"
 WORK_DIR.mkdir(exist_ok=True)
 LOG_PATH = WORK_DIR / "server.log"
-# Job xong vẫn giữ audio trong RAM/đĩa để client tải về; sau ngần này phút thì
-# dọn — nếu không, mỗi bài giảng để lại một thư mục temp và một entry JOBS
-# sống tới khi tắt server.
 JOB_RETENTION_MIN = max(5, int(os.environ.get("JOB_RETENTION_MIN", "60")))
-# Chỉ một worker chạy job, nên hàng đợi dài chỉ làm client chờ vô ích.
 MAX_PENDING_JOBS = max(1, int(os.environ.get("MAX_PENDING_JOBS", "4")))
-# Một job cho bài giảng dài có vài nghìn segment; chặn body lớn hơn để không
-# ai đẩy được payload khổng lồ vào server.
 MAX_BODY_BYTES = max(1, int(os.environ.get("MAX_BODY_MB", "16"))) * 1024 * 1024
-# Swagger UI và openapi.json KHÔNG khoá được bằng dependency của FastAPI (chúng
-# là route Starlette thuần, dependencies chỉ áp cho APIRoute), nên mặc định tắt
-# hẳn. Bật lại bằng ENABLE_DOCS=1 khi cần thử tay trên máy mình.
 ENABLE_DOCS = os.environ.get("ENABLE_DOCS", "").strip().lower() in ("1", "true", "yes")
 
-# Trần thời gian tổng hợp MỘT câu. Kokoro chạy ~0.35x thời gian thực, nên một
-# câu 30 giây mất khoảng 10 giây; quá ngần này là nó đã kẹt chứ không phải
-# chậm. Không có trần thì job treo vĩnh viễn và worker duy nhất kẹt theo, mọi
-# job sau xếp hàng sau một thứ không bao giờ xong.
 SYNTH_TIMEOUT_SEC = max(30, int(os.environ.get("SYNTH_TIMEOUT_SEC", "300")))
-# Số câu tổng hợp cùng lúc. onnxruntime không scale tuyến tính theo thread (đo
-# trên 6 core: 1 thread RTF 0.84, 6 thread 0.40 — chỉ nhanh 2.1 lần), nên chạy
-# vài câu song song lấp được phần CPU bỏ trống: 3 câu song song đưa RTF xuống
-# 0.232, nhanh hơn 1.7 lần so với chạy tuần tự.
 SYNTH_WORKERS = max(1, int(os.environ.get("SYNTH_WORKERS", "3")))
-# Hệ số ước dung lượng cần cho một job: master WAV + toàn bộ câu đã cắt vừa
-# khe (giữ tới lúc ghép) + file nén cuối.
 DISK_BYTES_PER_SEC = 24000 * 2 * 2.5
 DISK_MARGIN_BYTES = 64 * 1024 * 1024
 
-# job_id do server sinh bằng uuid4().hex[:16] — chốt đúng dạng đó trước khi
-# ghép vào đường dẫn file.
 JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 AUDIO_EXTS = {"opus", "mp3"}
 
@@ -154,10 +103,10 @@ JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kokoro-job"
 
 @app.middleware("http")
 async def limit_body_size(request, call_next):
-    """Chặn body quá lớn theo SỐ BYTE THẬT nhận được.
+    """Chặn body quá lớn theo số byte thật nhận được.
 
-    Chỉ nhìn Content-Length là hở: request chunked không khai header đó, và
-    khi ấy toàn bộ body vẫn được đọc vào RAM rồi mới bị validate từ chối.
+    Không tin Content-Length: client tự khai được, còn body chunked thì không có
+    header đó.
     """
 
     too_large = JSONResponse(
@@ -179,8 +128,6 @@ async def limit_body_size(request, call_next):
             received += len(message.get("body", b""))
             if received > MAX_BODY_BYTES:
                 overflowed = True
-                # Cắt luồng thay vì đọc tiếp: phần đã nhận bị bỏ, handler thấy
-                # body kết thúc sớm và trả lỗi, còn ta trả 413 ở dưới.
                 return {"type": "http.disconnect"}
         return message
 
@@ -211,10 +158,8 @@ def _evict_old_jobs() -> None:
 def _synth_with_timeout(text: str, out_path: Path, voice: str, speed: float):
     """Gọi ENGINE.synth trong thread riêng, bỏ cuộc nếu quá hạn.
 
-    Thread không giết được từ bên ngoài nên nếu quá hạn thì coi như engine hỏng:
-    đánh dấu ENGINE_ERROR để /api/health nói thật và job mới bị từ chối bằng
-    503 thay vì xếp hàng sau một câu không bao giờ xong. Dùng daemon thread để
-    cái đang kẹt không giữ tiến trình lại lúc tắt server.
+    Hết giờ thì thread nền vẫn đang giữ session ONNX, nên engine bị đánh dấu
+    hỏng thay vì dùng lại.
     """
 
     global ENGINE, ENGINE_ERROR
@@ -243,11 +188,7 @@ def _synth_with_timeout(text: str, out_path: Path, voice: str, speed: float):
 
 
 def _require_disk_space(duration_sec: float) -> None:
-    """Từ chối sớm nếu đĩa không đủ chỗ cho job này.
-
-    Hết đĩa giữa chừng thì job chết sau khi đã tổng hợp hàng trăm câu, và còn
-    để lại đống file tạm làm đĩa đầy thêm.
-    """
+    """Từ chối sớm nếu đĩa không đủ chỗ cho job này."""
 
     needed = int(duration_sec * DISK_BYTES_PER_SEC) + DISK_MARGIN_BYTES
     free = shutil.disk_usage(WORK_DIR).free
@@ -406,11 +347,7 @@ def synthesize(req: SynthesizeRequest):
 
 @app.delete("/api/job/{job_id}")
 def cancel_job(job_id: str):
-    """Dừng một job đang chạy.
-
-    Đóng tab lúc đang lồng tiếng không dừng được gì: server vẫn tổng hợp tới
-    hết trên worker duy nhất, mọi job khác xếp hàng phía sau hàng phút.
-    """
+    """Dừng một job đang chạy."""
 
     with JOBS_LOCK:
         job = JOBS.get(_validated_job_id(job_id))
@@ -493,16 +430,12 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             t0 = time.time()
             result = _synth_with_timeout(text_vi, raw_wav, req.voice, 1.0)
             base_sec = result.duration_sec
-            # Vượt khe: đọc lại nhanh hơn bằng tốc độ native — prosody vẫn tự
-            # nhiên, hơn hẳn kéo giãn tín hiệu bằng atempo ở bước sau.
             if base_sec > slot_sec + 0.02:
                 result = _synth_with_timeout(text_vi, raw_wav, req.voice, base_sec / slot_sec)
             t_synth = time.time() - t0
 
             info = audio_pipeline.stretch_to_fit(raw_wav, fit_wav, result.duration_sec, slot_sec)
             raw_wav.unlink(missing_ok=True)
-            # baseSec = độ dài lúc đọc tốc độ thường; measuredSyllablesPerSec
-            # phải tính trên nó, không phải trên bản đã tăng tốc.
             info.update(
                 id=seg.id,
                 syllables=tts_engine.count_vi_syllables(text_vi),
@@ -519,13 +452,10 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             for window in windows:
                 segments = [segment_by_id[i] for i in window["segmentIds"]]
                 window_wavs = []
-                # map trả kết quả đúng thứ tự câu, nên log vẫn tuần tự dù việc
-                # tổng hợp chạy song song.
                 for info, (position, fit_wav), t_synth in pool.map(synthesize_one, segments):
                     meta.append(info)
                     t_synth_total += t_synth
                     done_segments += 1
-                    # Câu được đặt tương đối so với đầu cửa sổ, không phải đầu video.
                     window_wavs.append((
                         {"start": position["start"] - window["startSec"], "end": position["end"]},
                         fit_wav,
@@ -560,8 +490,6 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
                     "url": f"/audio/{job_id}/w{window['index']}.{ext}",
                     "duckEnvelope": duck,
                 })
-                # Công bố ngay: client tải và phát cửa sổ này trong lúc các cửa
-                # sổ sau còn đang tổng hợp.
                 with JOBS_LOCK:
                     JOBS[job_id]["windows"] = list(published)
                 logger.info("%s cửa sổ %d/%d sẵn sàng [%.1fs-%.1fs] — %.0f KB",
@@ -591,7 +519,6 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
                 status="cancelled", error="Job bị huỷ theo yêu cầu", finishedAt=time.time()
             )
     except OSError as e:
-        # Errno 28/ENOSPC trên Linux, WinError 112 trên Windows.
         logger.exception("%s LỖI ĐĨA sau %s", tag, _fmt_dur(time.time() - t_job))
         shutil.rmtree(job_dir, ignore_errors=True)
         detail = f"Lỗi ghi đĩa (có thể đã hết dung lượng tại {WORK_DIR}): {e}"
@@ -604,9 +531,6 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
             JOBS[job_id].update(status="error", error=str(e), finishedAt=time.time())
 
 
-# ---------------------------------------------------------------------------
-# Khởi động
-# ---------------------------------------------------------------------------
 
 
 def load_engine_background() -> None:
@@ -639,11 +563,7 @@ def print_server_info(host: str, port: int) -> None:
 
 
 def require_ffmpeg() -> None:
-    """Chốt ffmpeg ngay lúc khởi động.
-
-    Không có bước này thì thiếu ffmpeg chỉ lộ ra ở cuối job — sau khi đã tổng
-    hợp xong hàng trăm câu và đã trả tiền cho bước dịch.
-    """
+    """Chốt ffmpeg ngay lúc khởi động."""
 
     if shutil.which("ffmpeg"):
         return

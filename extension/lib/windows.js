@@ -1,13 +1,4 @@
-/**
- * Quyết định audio nào đang phải phát và âm nền video phải ở mức nào.
- *
- * Tách khỏi content.js để test được không cần DOM: đây là chỗ mọi lỗi đồng
- * bộ trú ngụ (chọn nhầm cửa sổ, tra nhầm mốc đường bao), còn phần tạo thẻ
- * <audio> và gọi play() thì không có gì để sai.
- *
- * Một cửa sổ phủ [startSec, endSec) của video. Audio bên trong nó dài đúng
- * bằng khoảng đó, nên vị trí phát = thời điểm video trừ startSec.
- */
+/** Quyết định audio nào đang phải phát và âm nền video phải ở mức nào. */
 var DUB = globalThis.DUB || (globalThis.DUB = {});
 
 (function () {
@@ -33,18 +24,13 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       const binary = atob(envelope.data);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      // Mảng rỗng vẫn "truthy": để lọt thì tra ra phần tử -1, thành NaN, và
-      // video giữ nguyên âm lượng gốc thay vì được hạ xuống.
       return bytes.length ? { bytes, fps: envelope.fps } : null;
     } catch (e) {
       return null;
     }
   }
 
-  /**
-   * Âm lượng track gốc tại một mốc thời gian của video, theo đường bao của
-   * chính cửa sổ đó. Trả 0 khi không có đường bao — nơi gọi hiểu là "mute".
-   */
+  /** Âm lượng track gốc tại một mốc thời gian của video, theo đường bao của chính cửa sổ đó. */
   function gainAt(win, seconds) {
     if (!win || !win.duck) return 0;
     const index = Math.round((seconds - win.startSec) * win.duck.fps);

@@ -69,7 +69,6 @@ class TimelineTest(unittest.TestCase):
         self.assertTrue(any(frames[int(2.0 * ap.SAMPLE_RATE) : int(2.3 * ap.SAMPLE_RATE)]))
 
     def test_sentence_never_spills_into_the_next_one(self):
-        # Câu đầu dài 2s nhưng câu kế bắt đầu ở giây thứ 1.
         out = self.build([(0.0, 2.0), (1.0, 0.5)], 3.0)
         self.assertEqual(len(read_frames(out)), int(3.0 * ap.SAMPLE_RATE))
 
@@ -82,7 +81,6 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(len(read_frames(out)), int(2.0 * ap.SAMPLE_RATE))
 
     def test_memory_does_not_scale_with_video_length(self):
-        # Bản trước dựng cả timeline trong RAM rồi copy: video 1 tiếng ~825 MB.
         path = self.dir / "one.wav"
         write_wav(path, tone(0.2))
         tracemalloc.start()
@@ -109,8 +107,6 @@ class DuckEnvelopeTest(unittest.TestCase):
     def test_bed_drops_under_speech_and_returns_in_silence(self):
         gains = self.gains(1.0, 1.5)
         self.assertLess(gains[ap.DUCK_FPS - 1], ap.DUCK_SPEAKING + 0.02)
-        # Release tau 0.4s: sau 1.5s im lặng còn cách mức nền vài phần nghìn,
-        # cộng sai số lượng tử 8-bit.
         self.assertGreater(gains[-1], ap.DUCK_SILENT - 0.01)
 
     def test_attack_is_faster_than_release(self):
@@ -126,7 +122,6 @@ class DuckEnvelopeTest(unittest.TestCase):
         self.assertTrue(all(g >= ap.DUCK_SILENT - 1 / 255 for g in gains))
 
     def test_track_shorter_than_one_frame_has_no_envelope(self):
-        # Mảng rỗng lọt xuống client sẽ thành âm lượng NaN, nên phải trả None.
         write_wav(self.path, [0] * 100)
         self.assertIsNone(ap.duck_envelope(self.path))
 
@@ -173,11 +168,7 @@ class VoicepackLoaderTest(unittest.TestCase):
             archive.writestr("vp/data/0", storage_bytes)
 
     def rebuild_payload(self, size, stride, offset=0, numel=1):
-        """Dựng đúng chuỗi opcode mà torch.save sinh ra cho một tensor.
-
-        Viết tay thay vì gọi torch, vì torch cố tình không còn được cài trong
-        môi trường chạy server.
-        """
+        """Dựng đúng chuỗi opcode mà torch.save sinh ra cho một tensor."""
 
         def text(value):
             raw = value.encode()
@@ -190,20 +181,20 @@ class VoicepackLoaderTest(unittest.TestCase):
             return b"(" + b"".join(number(v) for v in values) + b"t"
 
         return b"".join([
-            b"\x80\x02",                                  # PROTO 2
-            b"ctorch._utils\n_rebuild_tensor_v2\n",       # GLOBAL: hàm dựng tensor
-            b"(",                                         # MARK: tuple tham số
-            b"(",                                         # MARK: persistent id
+            b"\x80\x02",
+            b"ctorch._utils\n_rebuild_tensor_v2\n",
+            b"(",
+            b"(",
             text("storage"),
-            b"ctorch\nFloatStorage\n",                    # GLOBAL: kiểu lưu trữ
+            b"ctorch\nFloatStorage\n",
             text("0"), text("cpu"), number(numel),
-            b"tQ",                                        # TUPLE, BINPERSID
+            b"tQ",
             number(offset),
             tuple_of(size),
             tuple_of(stride),
-            b"\x89",                                      # requires_grad = False
-            b"}",                                         # backward_hooks = {}
-            b"tR.",                                       # TUPLE, REDUCE, STOP
+            b"\x89",
+            b"}",
+            b"tR.",
         ])
 
     def test_reads_a_normal_voicepack(self):
@@ -221,7 +212,6 @@ class VoicepackLoaderTest(unittest.TestCase):
         self.assertTrue(np.array_equal(loaded, source.reshape(3, 1, 256)))
 
     def test_refuses_shape_that_reaches_past_the_stored_data(self):
-        # as_strided không kiểm biên: shape dối trá đọc được ra ngoài buffer.
         import numpy as np
 
         source = np.zeros(1 * 1 * 256, dtype=np.float32)
@@ -255,7 +245,6 @@ class VoicepackLoaderTest(unittest.TestCase):
             kokoro_onnx.load_voicepack(path)
 
     def test_refuses_a_pickle_that_calls_something_else(self):
-        # Voicepack cố gọi os.system phải bị unpickler chặn.
         path = self.dir / "rce.pt"
         payload = b"\x80\x02cos\nsystem\nX\x04\x00\x00\x00echo\x85R."
         self.write_pt(path, payload, b"")
@@ -372,15 +361,13 @@ class NumberReadingTest(unittest.TestCase):
                 self.assertEqual(self.spoken(digits), expected)
 
     def test_follows_vietnamese_irregular_forms(self):
-        # Những chỗ tiếng Việt không đọc theo quy tắc đều.
-        self.assertEqual(self.spoken("15"), "mười lăm")       # không phải "mười năm"
-        self.assertEqual(self.spoken("21"), "hai mươi mốt")   # không phải "hai mươi một"
+        self.assertEqual(self.spoken("15"), "mười lăm")
+        self.assertEqual(self.spoken("21"), "hai mươi mốt")
         self.assertEqual(self.spoken("24"), "hai mươi tư")
         self.assertEqual(self.spoken("25"), "hai mươi lăm")
         self.assertEqual(self.spoken("105"), "một trăm lẻ năm")
 
     def test_splits_letters_from_digits(self):
-        # Mã giảm giá kiểu SAVE10 phải tách thì G2P mới đọc được cả hai vế.
         self.assertEqual(self.spoken("SAVE10"), "SAVE mười")
         self.assertEqual(self.spoken("mã save 20"), "mã save hai mươi")
 
@@ -398,7 +385,6 @@ class NumberReadingTest(unittest.TestCase):
         self.assertEqual(self.spoken("3.11.4"), "ba chấm mười một chấm bốn")
 
     def test_identifiers_are_spelled_out(self):
-        # Số 0 đứng đầu là mã số chứ không phải giá trị.
         self.assertEqual(self.spoken("007"), "không không bảy")
         self.assertEqual(self.spoken("0912"), "không chín một hai")
 
@@ -411,5 +397,4 @@ class NumberReadingTest(unittest.TestCase):
             with self.subTest(sample=sample):
                 spoken = self.spoken(sample)
                 self.assertFalse(any(ch.isdigit() for ch in spoken), spoken)
-                # Và G2P phải ra phoneme thật, không phải dấu thanh trơ trọi.
                 self.assertGreater(len(kokoro_onnx.phonemize(spoken)), 20)

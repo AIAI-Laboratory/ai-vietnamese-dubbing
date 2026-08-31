@@ -1,16 +1,4 @@
-/**
- * Đọc phụ đề tiếng Anh từ video Coursera.
- *
- * Xác nhận bằng thực nghiệm trên trang bài giảng thật: Coursera gắn
- * <track kind="captions" srclang="en"> trỏ tới
- * /api/subtitleAssetProxy.v1/..., trả về text/vtt với
- * access-control-allow-origin: * — fetch trực tiếp từ content script được,
- * không cần qua service worker.
- *
- * KHÔNG có tier dự phòng đọc timestamp từ DOM (span.rc-Phrase): đã kiểm tra,
- * các phần tử đó không mang thuộc tính thời gian nào dùng được — chỉ có thứ
- * tự hiển thị. Không đủ để lồng tiếng đồng bộ nên cố tình không dùng.
- */
+/** Đọc phụ đề tiếng Anh từ video Coursera. */
 var DUB = globalThis.DUB || (globalThis.DUB = {});
 
 (function () {
@@ -38,7 +26,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     return cues;
   }
 
-  /** Tìm <track> tiếng Anh gắn trên thẻ <video>. Ưu tiên srclang bắt đầu bằng "en". */
+  /** Tìm <track> tiếng Anh gắn trên thẻ <video>. */
   function findEnglishTrackEl(video) {
     const tracks = [...video.querySelectorAll('track')];
     if (!tracks.length) return null;
@@ -49,7 +37,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     );
   }
 
-  /** Tier 1: fetch trực tiếp file VTT từ src của <track>. Nhanh và chính xác nhất. */
+  /** Tier 1 */
   async function fetchTrackCues(video) {
     const el = findEnglishTrackEl(video);
     if (!el || !el.src) return null;
@@ -64,10 +52,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     }
   }
 
-  /**
-   * Tier 2: đọc trực tiếp từ video.textTracks. Dùng khi không có <track>
-   * trong DOM (một số bài Coursera gắn track bằng JS thay vì thẻ tĩnh).
-   */
+  /** Tier 2 */
   async function readLiveTextTrackCues(video, timeoutMs = 3000) {
     const tracks = [...video.textTracks].filter(
       (t) => t.kind === 'captions' || t.kind === 'subtitles'
@@ -88,11 +73,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     return cues.length ? cues : null;
   }
 
-  /**
-   * Lấy cue tiếng Anh cho video hiện tại. Trả về null nếu không tìm được
-   * phụ đề nào — gọi nơi dùng phải báo lỗi rõ ràng cho người dùng, không
-   * đoán mò timestamp từ nguồn không đáng tin.
-   */
+  /** Lấy cue tiếng Anh cho video hiện tại. */
   async function getEnglishCues(video) {
     return (await fetchTrackCues(video)) || (await readLiveTextTrackCues(video));
   }

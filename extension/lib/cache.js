@@ -1,22 +1,10 @@
-/**
- * Cache kết quả lồng tiếng theo IndexedDB, để xem lại bài không phải dịch/
- * tổng hợp giọng lại từ đầu.
- *
- * Lưu ý: đây là IndexedDB của TRANG (coursera.org), không phải kho riêng của
- * extension — content script không truy cập được extension storage dạng
- * IndexedDB mà không định tuyến qua background. Đơn giản hơn là dùng luôn
- * storage của trang; xoá "site data" của Coursera trong Chrome sẽ xoá luôn
- * cache này, đó là đánh đổi chấp nhận được cho một công cụ chỉ chạy trên
- * đúng site này.
- */
+/** Cache kết quả lồng tiếng theo IndexedDB, để xem lại bài không phải dịch/ tổng hợp giọng lại từ đầu. */
 var DUB = globalThis.DUB || (globalThis.DUB = {});
 
 (function () {
   const DB_NAME = 'local-ai-vi-dub';
   const STORE = 'dubs';
   const DB_VERSION = 1;
-  // Mỗi bản ghi mang theo audio 5-15 MB. Không giới hạn thì IndexedDB của
-  // trang phình tới khi chạm quota rồi mọi lần ghi sau đều hỏng.
   const MAX_RECORDS = 12;
 
   function openDb() {
@@ -31,14 +19,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     });
   }
 
-  /**
-   * Khoá cache: những gì làm bản lồng tiếng khác hẳn đi.
-   *
-   * CỐ TÌNH không đưa viSyllablesPerSec vào đây. Tốc độ đọc tự hiệu chỉnh sau
-   * mỗi job, nên nếu nó nằm trong khoá thì lần xem lại nào cũng trượt cache và
-   * phải dịch lại từ đầu. Bản đã lồng tiếng vẫn nghe bình thường dù lần sau
-   * planner dùng tốc độ khác một chút.
-   */
+  /** Khoá cache */
   function makeKey({ videoId, voice, planVersion, translationModel }) {
     return JSON.stringify([
       videoId,
@@ -65,7 +46,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       tx.objectStore(STORE).put({ key: makeKey(keyParts), ...record, savedAt: Date.now() });
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error); // quota đầy đi đường này
+      tx.onabort = () => reject(tx.error);
     });
     await trim(db);
   }

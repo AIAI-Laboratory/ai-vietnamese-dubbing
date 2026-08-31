@@ -1,22 +1,5 @@
-"""
-Ghép các câu đã tổng hợp thành MỘT file audio dài bằng video, mỗi câu neo
-đúng vị trí tuyệt đối [start, end] lấy từ timestamp phụ đề gốc.
-
-Khe của một câu KHÔNG phải [start,end] của phụ đề mà kéo dài tới sát câu
-kế tiếp (available_slots): khoảng lặng giữa hai câu vốn không ai đọc, cho
-câu trước mượn thì phần lớn câu dài hết vượt mà không phải nén hay cắt.
-
-Quy tắc mỗi câu:
-  1. Tổng hợp giọng ở tốc độ tự nhiên.
-  2. Dài hơn khe: đọc lại bằng tốc độ native của engine (prosody thật, không
-     phải kéo giãn tín hiệu) — xem tts_engine.SPEED_MAX.
-  3. Vẫn dư chút: nén bằng ffmpeg atempo, giữ nguyên cao độ, tối đa 1.10x.
-  4. Nén hết mức vẫn chưa vừa: CẮT audio cho vừa khe (fallback an toàn cuối
-     cùng, đổi lấy việc không bao giờ đè vào câu kế tiếp) — đánh dấu
-     "overflowTruncated": true để báo cho người dùng biết câu nào bị cắt.
-  5. Ngắn hơn khe: giữ nguyên tốc độ tự nhiên, phần còn lại là im lặng.
-
-Cần ffmpeg trong PATH.
+"""Ghép các câu đã tổng hợp thành MỘT file audio dài bằng video, mỗi câu neo đúng vị trí tuyệt
+đối [start, end] lấy từ timestamp phụ đề gốc.
 """
 
 from __future__ import annotations
@@ -30,42 +13,18 @@ from pathlib import Path
 
 STRETCH_MAX = 1.10
 SAMPLE_RATE = 24000
-# ffmpeg thường xong trong dưới một giây cho một câu, nhưng nếu nó chờ gì đó
-# thì không có gì đánh thức nó dậy: job đứng im vô hạn và worker duy nhất của
-# server kẹt theo. Chốt trần thời gian, và đóng luôn stdin — ffmpeg hỏi
-# "overwrite?" trên stdin là một kiểu treo kinh điển.
 FFMPEG_TIMEOUT_SEC = max(30, int(os.environ.get("FFMPEG_TIMEOUT_SEC", "120")))
-# Khoảng thở chừa lại trước câu kế khi mượn khoảng lặng — hết sạch thì hai
-# câu dính liền nhau, nghe hụt hơi.
 BORROW_GAP_SEC = 0.08
 
-# --- Đường bao ducking cho track gốc của video --------------------------------
-# Trình duyệt hạ âm lượng video gốc theo đường cong này thay vì mute hẳn, nên
-# nhạc nền và tiếng động vẫn còn. Tính từ chính track thuyết minh đã dựng
-# xong: chỉ đổi độ lợi, không đụng vào phổ tín hiệu, nên không sinh nhiễu.
-DUCK_FPS = 20  # 50 ms mỗi mẫu — đủ mịn, 40 phút video chỉ tốn 48 KB
-# Mức nền khi đang đọc và khi im lặng; volume của HTML5 là biên độ tuyến
-# tính nên quy đổi dB là 10^(dB/20). -20 dB dưới giọng thuyết minh và -9 dB
-# trong khoảng lặng — thấp hơn mức -15/-6 dB của voice-over phát thanh, vì
-# tiếng gốc ở đây cũng là giọng người: nghe rõ chữ là đâm vào giọng đọc,
-# khác hẳn nhạc nền.
+DUCK_FPS = 20
 DUCK_SPEAKING = 0.10
 DUCK_SILENT = 0.35
-# Ngưỡng coi là "đang có tiếng đọc" (RMS trên toàn thang, ~-34 dBFS).
 DUCK_SPEECH_RMS = 0.02
-# Xuống nhanh để không đè lên đầu câu, lên chậm để nền dâng êm.
 DUCK_ATTACK_SEC = 0.08
 DUCK_RELEASE_SEC = 0.40
 
-# Số frame đọc/ghi mỗi lượt khi xử lý timeline. Toàn bộ đường ống audio làm
-# việc theo khối cỡ này thay vì nạp cả bài vào RAM: bài 2 tiếng là 345 MB
-# PCM, và bản trước đây giữ tới hai bản sao cùng lúc ở cả khâu ghép lẫn khâu
-# tính đường bao.
-STREAM_CHUNK_FRAMES = 1 << 16  # 65536 frame ~ 2.7 giây, 128 KB
+STREAM_CHUNK_FRAMES = 1 << 16
 
-# Bài giảng được cắt thành cửa sổ để phát được trước khi tổng hợp xong cả
-# bài. Ranh giới luôn rơi vào mốc bắt đầu của một câu, nên không câu nào bị
-# xẻ đôi giữa hai file.
 WINDOW_TARGET_SEC = 30.0
 
 
@@ -76,13 +35,8 @@ def _one_pole(tau_sec: float, fps: int) -> float:
 def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict | None:
     """Độ lợi cho track gốc theo thời gian, lấy từ track thuyết minh.
 
-    Trả về {"fps", "data"} với data là chuỗi base64 của mảng uint8, mỗi byte
-    là âm lượng track gốc (0-255 tương ứng 0.0-1.0) tại mốc index/fps giây;
-    None khi track ngắn hơn một khung, để client biết là không có đường bao
-    thay vì nhận một mảng rỗng rồi tính ra âm lượng NaN.
-
-    Đọc từng khung một và cộng bình phương trên int64 (chính xác tuyệt đối,
-    không tràn với int16) nên bộ nhớ không phụ thuộc độ dài video.
+    Trả None khi audio ngắn hơn một frame: client coi mảng rỗng là đường bao
+    hợp lệ rồi tính ra âm lượng NaN.
     """
 
     import numpy as np
@@ -97,7 +51,7 @@ def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict | None:
         while True:
             raw = handle.readframes(hop)
             if len(raw) < hop * 2:
-                break  # khung cuối không đủ dữ liệu thì bỏ, như bản cũ
+                break
             block = np.frombuffer(raw, dtype="<i2").astype(np.int64)
             rms = math.sqrt(float(block @ block) / len(block)) / 32768.0
             target = DUCK_SPEAKING if rms > DUCK_SPEECH_RMS else DUCK_SILENT
@@ -112,12 +66,7 @@ def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict | None:
 
 def plan_windows(segments: list[dict], duration_sec: float,
                  target_sec: float = WINDOW_TARGET_SEC) -> list[dict]:
-    """Gom câu thành cửa sổ ~target_sec giây để phát dần.
-
-    Cửa sổ đầu bắt đầu từ giây 0 (không phải từ câu đầu tiên) để mốc thời
-    gian của người xem và của file audio luôn lệch nhau đúng bằng startSec.
-    Cửa sổ cuối kéo tới hết video.
-    """
+    """Gom câu thành cửa sổ ~target_sec giây để phát dần."""
 
     ordered = sorted(segments, key=lambda seg: seg["start"])
     if not ordered:
@@ -127,7 +76,6 @@ def plan_windows(segments: list[dict], duration_sec: float,
     current: list[dict] = []
     start = 0.0
     for seg in ordered:
-        # Câu này mở một cửa sổ mới nếu cửa sổ hiện tại đã đủ dài.
         if current and seg["start"] - start >= target_sec:
             windows.append({"start": start, "end": seg["start"], "segments": current})
             start = seg["start"]
@@ -147,11 +95,7 @@ def plan_windows(segments: list[dict], duration_sec: float,
 
 
 def available_slots(segments: list[dict], duration_sec: float) -> dict[int, float]:
-    """Khe thật của từng câu: [start, start câu kế) trừ một khoảng thở.
-
-    Không bao giờ ngắn hơn [start,end] gốc — chỉ nới rộng, nên hành vi với
-    phụ đề chồng lấn giữ nguyên như trước.
-    """
+    """Khe thật của từng câu"""
 
     ordered = sorted(segments, key=lambda seg: seg["start"])
     slots: dict[int, float] = {}
@@ -267,13 +211,7 @@ def _copy_frames(src: Path, out: wave.Wave_write, skip: int, budget: int) -> int
 
 
 def assemble_timeline(segment_wavs: list[tuple[dict, Path]], duration_sec: float, out_wav: Path) -> None:
-    """Ghép các câu vào một track dài bằng video, ghi thẳng ra file.
-
-    Các câu được xếp theo mốc bắt đầu; khoảng trống giữa chúng là im lặng, và
-    câu nào lấn sang mốc của câu kế thì bị cắt ở đó — cùng kết quả với bản cũ
-    (ghi đè lên mảng master) cho mọi timeline không chồng lấn, nhưng không
-    bao giờ giữ quá một khối 128 KB trong RAM.
-    """
+    """Ghép các câu vào một track dài bằng video, ghi thẳng ra file."""
 
     total_frames = max(1, int(duration_sec * SAMPLE_RATE))
     ordered = sorted(segment_wavs, key=lambda item: item[0]["start"])

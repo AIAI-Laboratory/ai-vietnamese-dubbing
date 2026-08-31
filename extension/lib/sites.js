@@ -1,18 +1,4 @@
-/**
- * Adapter cho từng trang video. Content script chỉ biết interface này, mọi
- * chỗ phụ thuộc cấu trúc riêng của Coursera/YouTube nằm gọn ở đây.
- *
- * Mỗi adapter:
- *   id            định danh ngắn, đi vào khoá cache nên đổi là mất cache cũ
- *   matches(url)  trang này có phải của adapter không
- *   videoId()     khoá ổn định cho một bài giảng/video
- *   dockSelectors selector nút trên thanh điều khiển để neo nút Dub cạnh nó
- *   getCues(video) -> [{start,end,text}] phụ đề tiếng Anh, hoặc null
- *   noCuesHint    câu hướng dẫn khi không lấy được phụ đề (mỗi trang một khác)
- *
- * Thêm trang mới = thêm một object vào ADAPTERS + một entry matches/
- * host_permissions trong manifest.json.
- */
+/** Adapter cho từng trang video. */
 var DUB = globalThis.DUB || (globalThis.DUB = {});
 
 (function () {
@@ -22,14 +8,10 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     matches: (url) => /^https:\/\/www\.coursera\.org\/learn\//.test(url),
 
     videoId() {
-      // .../learn/<course-slug>/lecture/<itemId>/<item-slug>
       const m = location.pathname.match(/\/learn\/([^/]+)\/lecture\/([^/]+)/);
       return m ? `${m[1]}::${m[2]}` : location.pathname;
     },
 
-    // Neo bằng aria-label thay vì tên class — class do build tool sinh
-    // ("css-179heut") đổi mỗi lần Coursera deploy, aria-label phục vụ
-    // accessibility nên ổn định hơn nhiều.
     dockSelectors: ['button[aria-label="Video playback rate switcher"]'],
 
     getCues: (video) => DUB.vtt.getEnglishCues(video),
@@ -49,20 +31,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
 
     dockSelectors: ['.ytp-settings-button', '.ytp-subtitles-button'],
 
-    /**
-     * Phụ đề lấy từ bảng "Show transcript" mà chính YouTube render ra DOM.
-     *
-     * KHÔNG tải file phụ đề qua captionTrack.baseUrl nữa: từ 2025 YouTube bắt
-     * buộc tham số PoToken (chữ ký do player sinh lúc chạy) cho endpoint
-     * /api/timedtext. Đã kiểm chứng bằng request thật — thiếu token thì server
-     * trả HTTP 200 với body RỖNG, cả fmt=vtt lẫn json3/srv3, kể cả khi có
-     * cookie phiên. Endpoint nội bộ youtubei/v1/get_transcript cũng trả 400
-     * FAILED_PRECONDITION. Bảng transcript thì do trang tự dựng nên không
-     * phải ký gì cả.
-     *
-     * Đánh đổi: mốc thời gian trong bảng chỉ chính xác tới giây và chỉ có
-     * điểm bắt đầu, nên điểm kết thúc lấy theo câu kế tiếp.
-     */
+    /** Phụ đề lấy từ bảng "Show transcript" mà chính YouTube render ra DOM. */
     async getCues(video) {
       const fromDom = await DUB.vtt.getEnglishCues(video);
       if (fromDom && fromDom.length) return fromDom;
@@ -74,11 +43,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       + 'chọn ngôn ngữ English, rồi bấm lại. Video không có phụ đề tiếng Anh thì không lồng tiếng được.',
   };
 
-  // --- Bảng transcript của YouTube -----------------------------------------
-
   const TRANSCRIPT_SEGMENT = 'ytd-transcript-segment-renderer';
-  // Nút mở bảng nằm trong phần mô tả; aria-label đổi theo ngôn ngữ giao diện
-  // nên phải dò cả nhãn lẫn vị trí.
   const TRANSCRIPT_BUTTON = [
     'ytd-video-description-transcript-section-renderer button',
     'button[aria-label*="transcript" i]',
@@ -90,7 +55,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const warn = (...args) => console.warn("[LDUB]", ...args);
 
-  /** "1:02" -> 62; "1:02:03" -> 3723. Trả null nếu không phải mốc thời gian. */
+  /** "1 */
   function parseClockTime(text) {
     const parts = String(text).trim().split(':');
     if (parts.length < 2 || parts.length > 3) return null;
@@ -98,10 +63,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     return parts.reduce((total, part) => total * 60 + Number(part), 0);
   }
 
-  /**
-   * Dòng transcript -> cue. Bảng chỉ cho mốc bắt đầu, nên mỗi dòng kéo dài
-   * tới dòng kế tiếp; dòng cuối kéo tới hết video.
-   */
+  /** Dòng transcript -> cue. */
   function segmentsToCues(rows, durationSec) {
     const clean = rows
       .map((row) => ({ start: parseClockTime(row.time), text: String(row.text || '').trim() }))
@@ -111,7 +73,6 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       const next = i + 1 < clean.length ? clean[i + 1].start : durationSec;
       return {
         start: row.start,
-        // Dòng cuối của video ngắn hơn mốc của nó thì vẫn phải có độ dài dương.
         end: Math.max(row.start + 0.5, Number(next) || row.start + 2),
         text: row.text,
       };
@@ -135,7 +96,6 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   /** Bấm nút mở bảng transcript nếu nó chưa mở. */
   function openTranscriptPanel() {
     if (document.querySelector(TRANSCRIPT_SEGMENT)) return true;
-    // Phần mô tả phải mở rộng thì nút transcript mới được render.
     const expand = document.querySelector('#description-inline-expander #expand');
     if (expand) expand.click();
     for (const selector of TRANSCRIPT_BUTTON) {

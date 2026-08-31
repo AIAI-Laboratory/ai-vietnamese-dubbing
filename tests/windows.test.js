@@ -1,7 +1,4 @@
-/**
- * Logic chọn cửa sổ audio và tra đường bao ducking.
- * Chạy: node --test tests/windows.test.js
- */
+/** Logic chọn cửa sổ audio và tra đường bao ducking. */
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -37,7 +34,6 @@ test('mốc chưa có cửa sổ nào phủ thì trả null, không ném lỗi',
   assert.strictEqual(windows.pick(LIST, 120), null, 'quá cửa sổ cuối');
   assert.strictEqual(windows.pick(LIST, -1), null, 'trước cửa sổ đầu');
   assert.strictEqual(windows.pick([], 5), null, 'chưa có cửa sổ nào');
-  // Đang tổng hợp: mới có cửa sổ đầu mà người xem đã tua tới phút thứ 2.
   assert.strictEqual(windows.pick([LIST[0]], 95), null);
 });
 
@@ -53,11 +49,10 @@ test('cửa sổ về sai thứ tự vẫn được xếp lại đúng', () => {
 test('vị trí phát là thời điểm video trừ mốc bắt đầu cửa sổ', () => {
   assert.strictEqual(windows.offsetIn(LIST[1], 45), 9);
   assert.strictEqual(windows.offsetIn(LIST[0], 12.5), 12.5);
-  // Tua ngược về trước cửa sổ: kẹp về 0 thay vì đặt currentTime âm (ném lỗi).
   assert.strictEqual(windows.offsetIn(LIST[2], 10), 0);
 });
 
-/** Đường bao 4 mẫu ở 20fps: [0, 128, 255, 64] */
+/** Đường bao 4 mẫu ở 20fps */
 function envelope() {
   return windows.decodeEnvelope({ fps: 20, data: Buffer.from([0, 128, 255, 64]).toString('base64') });
 }
@@ -73,7 +68,6 @@ test('giải mã đường bao và tra theo thời gian của video', () => {
 
 test('tra ngoài phạm vi đường bao trả 0 chứ không NaN', () => {
   const win = { startSec: 36, endSec: 72, duck: envelope() };
-  // NaN lọt xuống video.volume sẽ ném lỗi và để tiếng gốc ở mức đầy.
   for (const t of [35, 36 - 0.1, 60, 1000]) {
     const gain = windows.gainAt(win, t);
     assert.ok(Number.isFinite(gain), `t=${t} phải ra số hữu hạn, nhận ${gain}`);
@@ -91,7 +85,6 @@ test('đường bao thiếu, hỏng hoặc rỗng đều thành null', () => {
 });
 
 test('cửa sổ cũ trong cache phủ cả video vẫn dùng được', () => {
-  // Bản trước đây là một file duy nhất; content.js coi nó như [0, Infinity).
   const legacy = [{ startSec: 0, endSec: Infinity, id: 'legacy' }];
   assert.strictEqual(windows.pick(legacy, 0).id, 'legacy');
   assert.strictEqual(windows.pick(legacy, 3599).id, 'legacy');

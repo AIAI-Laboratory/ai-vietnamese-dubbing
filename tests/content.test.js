@@ -1,12 +1,4 @@
-/**
- * Chạy content.js thật trong Node với DOM và chrome giả lập.
- *
- * `node --check` chỉ bắt lỗi cú pháp. Một biến còn sót sau refactor
- * (ReferenceError) chỉ nổ lúc chạy, và đã từng lọt tới tận trình duyệt của
- * người dùng. Test này đi đúng đường phát audio nên bắt được loại đó.
- *
- * Chạy: node --test tests/content.test.js
- */
+/** Chạy content.js thật trong Node với DOM và chrome giả lập. */
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -33,8 +25,7 @@ function makeElement(tag = 'div') {
     disabled: false,
     value: '',
     src: '',
-    options: [],   // <select> thật có thuộc tính này
-    // Thuộc tính của <audio>/<video>
+    options: [],
     currentTime: 0,
     duration: 600,
     paused: true,
@@ -69,8 +60,6 @@ function makeElement(tag = 'div') {
     removeEventListener() {},
     getBoundingClientRect() { return { top: 0, left: 0, right: 800, bottom: 450, width: 800, height: 450 }; },
     closest() { return null; },
-    // Nhớ theo selector: setPanel ghi vào cùng một phần tử qua nhiều lần gọi,
-    // trả phần tử mới mỗi lần thì test không quan sát được gì.
     querySelector(selector) {
       el.__found = el.__found || new Map();
       if (!el.__found.has(selector)) el.__found.set(selector, makeElement());
@@ -91,7 +80,6 @@ function loadContentScript() {
   const video = makeElement('video');
   video.duration = 600;
   video.paused = false;
-  // Coursera lấy phụ đề qua <track>, không có thì đọc video.textTracks.
   video.textTracks = [{
     kind: 'captions',
     language: 'en',
@@ -180,7 +168,7 @@ function loadContentScript() {
   return { context, video, ports, created, body };
 }
 
-/** Màu chấm trạng thái đang gắn trên nút Dub: working|partial|ready|error. */
+/** Màu chấm trạng thái đang gắn trên nút Dub */
 function statusOf(harness) {
   const button = harness.created.find(
     (el) => el.tagName === 'BUTTON' && /ldub-btn/.test(el.className) && el.listeners.click,
@@ -210,10 +198,9 @@ function tick(context, times = 1) {
 
 /** Đưa content script tới trạng thái đã gắn nút và mở port job. */
 async function startJob(harness) {
-  tick(harness.context); // vòng watchNavigation: tìm video, gắn overlay
+  tick(harness.context);
   await new Promise((r) => setTimeout(r, 5));
 
-  // Nút Dub là <button class="ldub-btn ..."> có listener click.
   const dubButton = harness.created.find(
     (el) => el.tagName === 'BUTTON' && /ldub-btn/.test(el.className) && el.listeners.click,
   );
@@ -283,7 +270,6 @@ test('vòng đồng bộ chạy được sau khi có cửa sổ, không ném l�
   port.__deliver(windowMessage(1, 36, 72));
   await new Promise((r) => setTimeout(r, 10));
 
-  // Người xem đang ở giây 40 -> phải dùng cửa sổ thứ hai.
   harness.video.currentTime = 40;
   harness.video.paused = false;
   tick(harness.context, 3);
@@ -311,22 +297,18 @@ test('job lỗi hiện thông báo thay vì im lặng', async () => {
   assert.match(panelText(harness), /server tắt/);
 });
 
-
 test('tiến độ của phần còn lại không mở lại bảng khi đã phát được', async () => {
   const harness = loadContentScript();
   const port = await startJob(harness);
 
-  // Đang tổng hợp: bảng phải hiện.
   port.__deliver({ type: 'PROGRESS', pct: 60, note: 'Đang tổng hợp giọng đọc — 10/50 câu' });
   await new Promise((r) => setTimeout(r, 5));
   assert.strictEqual(panelVisible(harness), true, 'lúc chưa phát được thì bảng phải hiện');
 
-  // Cửa sổ đầu về -> bắt đầu phát, bảng đóng lại.
   port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
   await new Promise((r) => setTimeout(r, 10));
   assert.strictEqual(panelVisible(harness), false, 'phát được rồi thì bảng phải đóng');
 
-  // Các cửa sổ sau vẫn đang tổng hợp — tiến độ KHÔNG được bật lại bảng.
   for (const pct of [70, 80, 95]) {
     port.__deliver({ type: 'PROGRESS', pct, note: `Đang tổng hợp giọng đọc — ${pct}%` });
   }
@@ -334,25 +316,20 @@ test('tiến độ của phần còn lại không mở lại bảng khi đã ph�
   assert.strictEqual(panelVisible(harness), false, 'tiến độ phần còn lại không được che video');
 });
 
-
 test('chấm trạng thái đổi màu theo từng bước', async () => {
   const harness = loadContentScript();
   const port = await startJob(harness);
 
-  // Vừa bấm: đang dịch, chưa nghe được gì.
   assert.strictEqual(statusOf(harness), 'working');
 
-  // Cửa sổ đầu về: nghe được rồi nhưng phần sau còn tổng hợp.
   port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
   await new Promise((r) => setTimeout(r, 10));
   assert.strictEqual(statusOf(harness), 'partial');
 
-  // Tiến độ chưa xong thì vẫn là partial.
   port.__deliver({ type: 'PROGRESS', pct: 80, note: '40/50 câu' });
   await new Promise((r) => setTimeout(r, 5));
   assert.strictEqual(statusOf(harness), 'partial');
 
-  // Job xong hẳn: xanh lá.
   port.__deliver({ type: 'DONE', plan: PLAN, subtitles: SUBTITLES, windows: [], overflowSegmentIds: [] });
   await new Promise((r) => setTimeout(r, 10));
   assert.strictEqual(statusOf(harness), 'ready');
@@ -366,33 +343,27 @@ test('job lỗi thì chấm chuyển đỏ', async () => {
   assert.strictEqual(statusOf(harness), 'error');
 });
 
-
 test('đèn không được xanh lá khi job còn đang chạy', async () => {
   const harness = loadContentScript();
   const port = await startJob(harness);
 
-  // Mọi mốc tiến độ trong lúc dịch/tổng hợp đều KHÔNG được báo xong.
   for (const pct of [12, 50, 95, 97, 99, 100]) {
     port.__deliver({ type: 'PROGRESS', pct, note: `bước ${pct}%` });
     await new Promise((r) => setTimeout(r, 2));
     assert.strictEqual(statusOf(harness), 'working', `pct=${pct} vẫn đang chạy, chưa có audio`);
   }
 
-  // Có audio rồi nhưng job chưa xong -> xanh dương, kể cả khi pct = 100.
   port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
   port.__deliver({ type: 'PROGRESS', pct: 100, note: 'gần xong' });
   await new Promise((r) => setTimeout(r, 10));
   assert.strictEqual(statusOf(harness), 'partial');
 
-  // Chỉ DONE mới là xanh lá.
   port.__deliver({ type: 'DONE', plan: PLAN, subtitles: SUBTITLES, windows: [], overflowSegmentIds: [] });
   await new Promise((r) => setTimeout(r, 10));
   assert.strictEqual(statusOf(harness), 'ready');
 });
 
 test('bản ghi cache rỗng audio không được coi là đã xong', async () => {
-  // Bản ghi lưu lúc pipeline còn hỏng có windows rỗng: nhận nó làm cache hit
-  // thì đèn xanh lá mà không có tiếng nào.
   const harness = loadContentScript();
   harness.context.DUB.cache.get = async () => ({ windows: [], plan: PLAN, subtitles: SUBTITLES });
   const port = await startJob(harness);
@@ -400,7 +371,6 @@ test('bản ghi cache rỗng audio không được coi là đã xong', async () 
   assert.strictEqual(statusOf(harness), 'working', 'phải chạy job thật chứ không dùng cache rỗng');
   assert.ok(port.sent.some((m) => m.type === 'START'), 'phải gửi START để dịch lại');
 });
-
 
 /** Một phần tử rời để đóng vai "phần tử đang fullscreen". */
 function makeElementForTest() {
@@ -422,7 +392,6 @@ test('rời trang video thì phụ đề biến mất cùng', async () => {
   assert.ok(subtitle, 'phải có hộp phụ đề');
   assert.strictEqual(subtitle.parentElement, harness.body, 'phụ đề gắn thẳng vào body');
 
-  // Bấm nhanh sang bài kế: URL đổi -> vòng điều hướng dọn dẹp.
   harness.context.location.pathname = '/learn/abc/quiz/KHAC';
   tick(harness.context);
   await new Promise((r) => setTimeout(r, 5));
@@ -440,14 +409,12 @@ test('vào toàn màn hình thì phụ đề chuyển vào trong phần tử ful
   const subtitle = subtitleBox(harness);
   assert.strictEqual(subtitle.parentElement, harness.body);
 
-  // Trình duyệt chỉ vẽ phần tử fullscreen và con cháu của nó.
   const player = makeElementForTest();
   harness.context.document.fullscreenElement = player;
   harness.context.document.__fire('fullscreenchange');
 
   assert.strictEqual(subtitle.parentElement, player, 'phụ đề phải nằm trong phần tử fullscreen');
 
-  // Thoát toàn màn hình thì trả về body.
   harness.context.document.fullscreenElement = null;
   harness.context.document.__fire('fullscreenchange');
   assert.strictEqual(subtitle.parentElement, harness.body);

@@ -1,18 +1,4 @@
-"""
-Chạy Kokoro-Vietnamese ONNX chỉ với numpy + onnxruntime.
-
-Thay cho gói `kokoro-vietnamese` (Apache-2.0, github.com/iamdinhthuan/
-Kokoro-Vietnamese): đường ONNX của gói đó chỉ làm bốn việc — tách câu, đổi
-chữ sang phoneme, tra style vector theo số phoneme, gọi session.run — nhưng
-lại khai gradio, torch và transformers là dependency CỨNG. Đo trên máy dev:
-torch 490 MB, transformers 102 MB, gradio 78 MB trong tổng 1079 MB
-site-packages, trong khi torch chỉ được dùng đúng một dòng `torch.load` để
-đọc file voicepack 512 KB.
-
-Module này giữ nguyên thuật toán đó nên âm thanh phát ra không đổi, và bỏ
-được cả ba gói kia. Phần G2P vẫn dùng vig2p (chỉ phụ thuộc sea-g2p, không
-kéo theo gì nặng).
-"""
+"""Chạy Kokoro-Vietnamese ONNX chỉ với numpy + onnxruntime."""
 
 from __future__ import annotations
 
@@ -53,7 +39,6 @@ VOICES = {
     "duc_duy": {"label": "đức duy", "filename": "voicepacks/duc_duy.pt"},
 }
 
-# Kiểu lưu trữ của torch.save -> kiểu numpy tương ứng.
 _STORAGE_DTYPES = {
     "FloatStorage": np.dtype("<f4"),
     "HalfStorage": np.dtype("<f2"),
@@ -66,10 +51,8 @@ _STORAGE_DTYPES = {
 def load_voicepack(path: str | Path) -> np.ndarray:
     """Đọc file voicepack .pt mà không cần torch.
 
-    torch.save ghi ra một file ZIP: `data.pkl` là pickle của cấu trúc tensor,
-    còn số liệu thô nằm trong `data/<key>`. Unpickler dưới đây chỉ chấp nhận
-    đúng những lớp cần cho một tensor thường — bất cứ tên nào khác đều bị từ
-    chối, nên file lạ không chạy được code tuỳ ý qua pickle.
+    File tải từ Hub là pickle: chỉ cho phép dựng lại tensor, mọi opcode khác bị
+    từ chối, và mỗi view as_strided phải nằm gọn trong storage.
     """
 
     with zipfile.ZipFile(path) as archive:
@@ -81,9 +64,6 @@ def load_voicepack(path: str | Path) -> np.ndarray:
         prefix = pickle_name[: -len("data.pkl")]
 
         def rebuild(storage, offset, size, stride, *_rest):
-            # as_strided KHÔNG kiểm biên (numpy nói rõ trong tài liệu): shape
-            # và stride lấy từ file nên phải tự chốt, nếu không một voicepack
-            # dựng sẵn sẽ đọc được vùng nhớ ngoài buffer.
             size, stride = tuple(size), tuple(stride)
             if len(size) != len(stride):
                 raise ValueError("voicepack có shape và stride không cùng số chiều")
@@ -92,7 +72,6 @@ def load_voicepack(path: str | Path) -> np.ndarray:
             available = len(storage) - offset
             if available < 0:
                 raise ValueError("voicepack có offset vượt quá dữ liệu")
-            # Phần tử xa nhất mà view chạm tới, tính theo chỉ số phần tử.
             furthest = sum((dim - 1) * s for dim, s in zip(size, stride) if dim > 0)
             if size and furthest + 1 > available:
                 raise ValueError(
@@ -143,7 +122,7 @@ def split_text(text: str) -> list[str]:
     for match in re.finditer(r"[.!?…]+(?:[\"”’)]*)", normalized):
         end = match.end()
         if end < len(normalized) and not normalized[end].isspace():
-            continue  # dấu chấm giữa từ (số thập phân, viết tắt)
+            continue
         chunk = normalized[start:end].strip()
         if chunk:
             chunks.append(chunk)
@@ -164,16 +143,9 @@ def phonemize(text: str) -> str:
 
 
 def fit_to_context(chunk: str, context_length: int) -> list[str]:
-    """Cắt tiếp một mảnh cho tới khi vừa cửa sổ phoneme của model.
+    """Cắt tiếp một mảnh cho tới khi vừa cửa sổ phoneme của model."""
 
-    Model chỉ nhận context_length phoneme (512), và split_text chỉ cắt ở dấu
-    kết câu — phụ đề tự động của YouTube thường KHÔNG có dấu câu nào, nên một
-    "câu" có thể dài cả nghìn ký tự. Trước đây ca đó ném ValueError và giết
-    nguyên job, vứt toàn bộ tiền đã trả cho bước dịch. Giờ cắt tiếp ở dấu phẩy,
-    rồi ở khoảng trắng, và ghép lại bằng crossfade như các câu khác.
-    """
-
-    limit = context_length - 2  # chừa hai token bao ở hai đầu
+    limit = context_length - 2
     if len(phonemize(chunk)) <= limit:
         return [chunk]
 
@@ -195,9 +167,6 @@ def fit_to_context(chunk: str, context_length: int) -> list[str]:
         if all(len(phonemize(p)) <= limit for p in pieces):
             return pieces
 
-    # Một "từ" đơn dài hơn cả cửa sổ (URL, chuỗi rác trong phụ đề): cắt thô
-    # theo ký tự. Số phoneme không tỉ lệ đều với số ký tự nên phải dò thật
-    # đoạn dài nhất còn vừa, thay vì ước theo tỉ lệ trung bình.
     pieces = []
     rest = chunk
     while rest:
@@ -253,8 +222,6 @@ def merge_audio_chunks(chunks: list[np.ndarray], crossfade_samples: int) -> np.n
 
 def _session_options() -> ort.SessionOptions:
     options = ort.SessionOptions()
-    # Trong container bị giới hạn CPU, onnxruntime vẫn đếm số core của host và
-    # sinh thừa thread — đặt ORT_THREADS bằng số core thực được cấp.
     threads = os.environ.get("ORT_THREADS", "").strip()
     if threads.isdigit() and int(threads) > 0:
         options.intra_op_num_threads = int(threads)
@@ -281,9 +248,6 @@ class KokoroOnnx:
             model_path, sess_options=_session_options(), providers=["CPUExecutionProvider"]
         )
         self._voicepacks: dict[str, np.ndarray] = {}
-        # Chỉ khoá lúc nạp voicepack (tải file + giải nén). session.run của
-        # onnxruntime an toàn khi gọi từ nhiều luồng, và synthesize không sửa
-        # state nào của object, nên phần chạy model cố tình không khoá.
         self._voice_lock = threading.Lock()
         self.load_voice(voice)
 
@@ -300,7 +264,7 @@ class KokoroOnnx:
         with self._voice_lock:
             cached = self._voicepacks.get(voice)
             if cached is not None:
-                return cached  # luồng khác vừa nạp xong
+                return cached
             path = hf_hub_download(
                 repo_id=REPO_ID, filename=VOICES[voice]["filename"], revision=self.revision
             )
