@@ -162,6 +162,15 @@ function loadContentScript() {
   return { context, video, ports, created, body };
 }
 
+/** Màu chấm trạng thái đang gắn trên nút Dub: working|partial|ready|error. */
+function statusOf(harness) {
+  const button = harness.created.find(
+    (el) => el.tagName === 'BUTTON' && /ldub-btn/.test(el.className) && el.listeners.click,
+  );
+  const found = [...(button?.classList?._set || [])].find((c) => c.startsWith('ldub-status-'));
+  return found ? found.replace('ldub-status-', '') : null;
+}
+
 /** Bảng tiến độ có đang hiện không. */
 function panelVisible(harness) {
   const overlay = harness.created.find((el) => el.className === 'ldub-overlay');
@@ -305,4 +314,36 @@ test('tiến độ của phần còn lại không mở lại bảng khi đã ph�
   }
   await new Promise((r) => setTimeout(r, 5));
   assert.strictEqual(panelVisible(harness), false, 'tiến độ phần còn lại không được che video');
+});
+
+
+test('chấm trạng thái đổi màu theo từng bước', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+
+  // Vừa bấm: đang dịch, chưa nghe được gì.
+  assert.strictEqual(statusOf(harness), 'working');
+
+  // Cửa sổ đầu về: nghe được rồi nhưng phần sau còn tổng hợp.
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(statusOf(harness), 'partial');
+
+  // Tiến độ chưa xong thì vẫn là partial.
+  port.__deliver({ type: 'PROGRESS', pct: 80, note: '40/50 câu' });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(statusOf(harness), 'partial');
+
+  // Job xong hẳn: xanh lá.
+  port.__deliver({ type: 'DONE', plan: PLAN, subtitles: SUBTITLES, windows: [], overflowSegmentIds: [] });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(statusOf(harness), 'ready');
+});
+
+test('job lỗi thì chấm chuyển đỏ', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+  port.__deliver({ type: 'ERROR', message: 'server tắt' });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(statusOf(harness), 'error');
 });

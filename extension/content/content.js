@@ -190,6 +190,7 @@
       dockRetryTimer = null;
     }
     if (dubBtn) {
+      setStatus(null);
       dubBtn.remove();
       dubBtn = null;
     }
@@ -523,6 +524,24 @@
 
   /** Nút chỉ còn icon (xem .ldub-btn trong CSS) — text vẫn cập nhật trong DOM
    * (đọc được bằng screen reader) và làm title, hiện khi rê chuột vào. */
+  // Chấm màu ở góc nút: nhìn là biết đang ở đâu mà không phải mở bảng.
+  //   working = đang dịch/tổng hợp, chưa nghe được gì
+  //   partial = nghe được rồi, phần sau còn đang tổng hợp
+  //   ready   = xong toàn bộ (kể cả lấy từ cache)
+  //   error   = hỏng
+  const STATUS_CLASSES = [
+    "ldub-status-working",
+    "ldub-status-partial",
+    "ldub-status-ready",
+    "ldub-status-error",
+  ];
+
+  function setStatus(status) {
+    if (!dubBtn) return;
+    dubBtn.classList.remove(...STATUS_CLASSES);
+    if (status) dubBtn.classList.add(`ldub-status-${status}`);
+  }
+
   function setBtnLabel(text) {
     dubBtn.querySelector(".ldub-btn-text").textContent = text;
     dubBtn.title = text;
@@ -582,15 +601,17 @@
 
     setPanel(2, "Đang đọc phụ đề tiếng Anh...", true);
     currentState = "loading";
+    setStatus("working");
 
     const videoId = videoIdFromUrl();
     try {
       const cached = await DUB.cache
         .get(cacheKeyParts(videoId))
         .catch(() => null);
-      if (cached && cached.audioBase64) {
+      if (cached && (cached.windows || cached.audioBase64)) {
         setPanel(80, "Đang tải từ cache...", true);
         applyResult(cached);
+        setStatus("ready");
         return;
       }
 
@@ -617,6 +638,7 @@
             // trông như treo. DONE bên dưới vẫn là lưới đỡ, nhưng phải biết.
             warn("không dựng được cửa sổ audio:", error);
             setPanel(0, "Lỗi khi nhận audio: " + (error && error.message ? error.message : error), true);
+            setStatus("error");
           }
         } else if (msg.type === "DONE") {
           DUB.cache
@@ -629,9 +651,11 @@
             .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
           reportTruncatedSentences(msg);
           finalizeFromDone(msg);
+          setStatus(currentState === "error" ? "error" : "ready");
         } else if (msg.type === "ERROR") {
           setPanel(0, "Lỗi: " + msg.message, true);
           currentState = "error";
+          setStatus("error");
         }
       });
       port.postMessage({
@@ -656,8 +680,14 @@
   function reportProgress(msg) {
     const playing = currentState === "ready" && audioWindows.length > 0;
     setPanel(msg.pct, msg.note, !playing);
-    if (playing && dubBtn) {
-      dubBtn.title = msg.pct >= 99
+    if (!playing) {
+      setStatus("working");
+      return;
+    }
+    const finished = msg.pct >= 99;
+    setStatus(finished ? "ready" : "partial");
+    if (dubBtn) {
+      dubBtn.title = finished
         ? "Thuyết minh tiếng Việt"
         : `Đang tổng hợp phần còn lại — ${Math.round(msg.pct)}%`;
     }
@@ -739,6 +769,7 @@
     );
     setBtnLabel("Đang thuyết minh");
     dubBtn.classList.add("ldub-btn-active");
+    setStatus("partial");
 
     injectControls();
     startSync();

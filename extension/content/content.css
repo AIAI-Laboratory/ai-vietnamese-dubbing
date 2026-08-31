@@ -79,28 +79,63 @@
   background: linear-gradient(135deg, #1f2126, #17181c);
   box-shadow: 0 3px 12px rgba(0, 0, 0, .4), 0 0 0 1px rgba(255, 255, 255, .1) inset;
 }
-.ldub-btn.ldub-btn-active::after {
+/* Chấm trạng thái ở góc nút — nhìn là biết đang ở bước nào mà không cần mở
+   bảng: vàng đang dịch/tổng hợp, xanh dương đang phát nhưng phần sau còn
+   tổng hợp, xanh lá xong hết, đỏ lỗi. Hai màu "đang chạy" nhấp nháy để phân
+   biệt với hai màu đứng yên ngay cả khi người dùng không phân biệt được màu. */
+.ldub-btn[class*="ldub-status-"]::after {
   content: "";
   position: absolute;
   top: -2px; right: -2px;
-  width: 9px; height: 9px; border-radius: 50%;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+}
+.ldub-btn.ldub-status-working::after {
+  background: #f5b301;
+  box-shadow: 0 0 6px #f5b301, 0 0 0 2px var(--ldub-bg);
+  animation: ldub-pulse 1.3s ease-in-out infinite;
+}
+.ldub-btn.ldub-status-partial::after {
+  background: #3fa9ff;
+  box-shadow: 0 0 6px #3fa9ff, 0 0 0 2px var(--ldub-bg);
+  animation: ldub-pulse 1.3s ease-in-out infinite;
+}
+.ldub-btn.ldub-status-ready::after {
   background: #2ed573;
   box-shadow: 0 0 6px #2ed573, 0 0 0 2px var(--ldub-bg);
 }
+.ldub-btn.ldub-status-error::after {
+  background: #ff4757;
+  box-shadow: 0 0 6px #ff4757, 0 0 0 2px var(--ldub-bg);
+}
+@keyframes ldub-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .3; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ldub-btn[class*="ldub-status-"]::after { animation: none; }
+}
+
 /* Trong thanh điều khiển, trạng thái "đang thuyết minh" KHÔNG được vẽ nền:
    mọi nút gốc của trình phát đều trong suốt, thêm một hộp đen vào giữa hàng
    trông như lỗi hiển thị. Quy tắc này phải nằm SAU .ldub-btn-active vì hai
-   bên cùng độ ưu tiên — cái sau thắng. Dấu hiệu đang bật chuyển thành chấm
-   xanh nhỏ nằm gọn trong nút, giống cách trình phát tự đánh dấu nút bật. */
+   bên cùng độ ưu tiên — cái sau thắng. */
 .ldub-btn.ldub-btn-docked.ldub-btn-active {
   background: none;
   box-shadow: none;
 }
-.ldub-btn.ldub-btn-docked.ldub-btn-active::after {
+/* Chấm nằm gọn trong nút thay vì tràn ra mép: trên thanh điều khiển không có
+   khoảng trống quanh nút, chấm tràn ra sẽ bị cắt. Bỏ luôn viền nền vì nền ở
+   đây là thanh điều khiển của trang, không phải nền panel của mình. */
+.ldub-btn.ldub-btn-docked[class*="ldub-status-"]::after {
   top: 7px; right: 7px;
   width: 7px; height: 7px;
-  box-shadow: 0 0 5px #2ed573;
+  box-shadow: none;
 }
+.ldub-btn.ldub-btn-docked.ldub-status-working::after { box-shadow: 0 0 5px #f5b301; }
+.ldub-btn.ldub-btn-docked.ldub-status-partial::after { box-shadow: 0 0 5px #3fa9ff; }
+.ldub-btn.ldub-btn-docked.ldub-status-ready::after { box-shadow: 0 0 5px #2ed573; }
+.ldub-btn.ldub-btn-docked.ldub-status-error::after { box-shadow: 0 0 5px #ff4757; }
 /* Nút gốc của trình phát không phóng to khi rê chuột; nút mình cũng đừng. */
 .ldub-btn.ldub-btn-docked:hover { transform: none; }
 
