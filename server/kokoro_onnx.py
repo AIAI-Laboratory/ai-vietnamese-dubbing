@@ -80,9 +80,26 @@ def load_voicepack(path: str | Path) -> np.ndarray:
         prefix = pickle_name[: -len("data.pkl")]
 
         def rebuild(storage, offset, size, stride, *_rest):
+            # as_strided KHÔNG kiểm biên (numpy nói rõ trong tài liệu): shape
+            # và stride lấy từ file nên phải tự chốt, nếu không một voicepack
+            # dựng sẵn sẽ đọc được vùng nhớ ngoài buffer.
+            size, stride = tuple(size), tuple(stride)
+            if len(size) != len(stride):
+                raise ValueError("voicepack có shape và stride không cùng số chiều")
+            if offset < 0 or any(dim < 0 for dim in size) or any(s < 0 for s in stride):
+                raise ValueError("voicepack có offset/shape/stride âm")
+            available = len(storage) - offset
+            if available < 0:
+                raise ValueError("voicepack có offset vượt quá dữ liệu")
+            # Phần tử xa nhất mà view chạm tới, tính theo chỉ số phần tử.
+            furthest = sum((dim - 1) * s for dim, s in zip(size, stride) if dim > 0)
+            if size and furthest + 1 > available:
+                raise ValueError(
+                    f"voicepack khai vùng dữ liệu {furthest + 1} phần tử nhưng chỉ có {available}"
+                )
             view = np.lib.stride_tricks.as_strided(
                 storage[offset:],
-                shape=tuple(size),
+                shape=size,
                 strides=tuple(s * storage.itemsize for s in stride),
             )
             return np.array(view, copy=True)
