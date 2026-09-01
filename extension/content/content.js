@@ -50,8 +50,30 @@
   let voicesCache = null;
   let truncatedIds = new Set();
   let jobRunning = false;
+  let heldForSynthesis = false;
   let duckTimer = null;
   const liveObjectUrls = new Set();
+
+  /** Người xem tự bấm play trong lúc chờ thì trả quyền điều khiển lại cho họ. */
+  function releaseHold() {
+    heldForSynthesis = false;
+  }
+
+  /** Dừng video trong lúc tổng hợp — không có gì để nghe thì xem cũng vô nghĩa. */
+  function holdVideoForSynthesis() {
+    if (!video || video.paused || heldForSynthesis) return;
+    heldForSynthesis = true;
+    video.addEventListener("play", releaseHold);
+    video.pause();
+  }
+
+  /** Chạy tiếp khi audio đầu tiên đã sẵn sàng, chỉ khi chính mình đã dừng nó. */
+  function resumeVideoAfterSynthesis() {
+    if (!heldForSynthesis) return;
+    heldForSynthesis = false;
+    video.removeEventListener("play", releaseHold);
+    video.play().catch(() => {});
+  }
 
   /** Object URL sống theo document, gỡ thẻ <audio> không giải phóng blob — phải thu hồi tay. */
   function trackedObjectUrl(blob) {
@@ -146,6 +168,7 @@
       dockRetryTimer = null;
     }
     jobRunning = false;
+    heldForSynthesis = false;
     if (dubBtn) {
       setStatus(null);
       dubBtn.remove();
@@ -535,6 +558,7 @@
         return;
       }
 
+      holdVideoForSynthesis();
       const cues = await site.getCues(video);
       if (!cues || !cues.length) {
         setPanel(
@@ -544,6 +568,7 @@
           true,
         );
         currentState = "error";
+        resumeVideoAfterSynthesis();
         return;
       }
 
@@ -557,6 +582,7 @@
             warn("không dựng được cửa sổ audio:", error);
             setPanel(0, "Lỗi khi nhận audio: " + (error && error.message ? error.message : error), true);
             currentState = "error";
+            resumeVideoAfterSynthesis();
             refreshStatus();
           }
         } else if (msg.type === "DONE") {
@@ -577,6 +603,7 @@
           setPanel(0, "Lỗi: " + msg.message, true);
           currentState = "error";
           jobRunning = false;
+          resumeVideoAfterSynthesis();
           refreshStatus();
         }
       });
@@ -590,13 +617,17 @@
     } catch (e) {
       setPanel(0, "Lỗi: " + (e && e.message ? e.message : String(e)), true);
       currentState = "error";
+      resumeVideoAfterSynthesis();
     }
   }
 
   /** Tiến độ job. */
   function reportProgress(msg) {
     const playing = currentState === "ready" && audioWindows.length > 0;
-    setPanel(msg.pct, msg.note, !playing);
+    const note = heldForSynthesis
+      ? msg.note + " — video đang tạm dừng, tự chạy lại khi có tiếng"
+      : msg.note;
+    setPanel(msg.pct, note, !playing);
     refreshStatus();
     if (playing && dubBtn) {
       dubBtn.title = `Đang tổng hợp phần còn lại — ${Math.round(msg.pct)}%`;
@@ -684,6 +715,7 @@
     injectControls();
     startSync();
     setMode("dubbed");
+    resumeVideoAfterSynthesis();
   }
 
   function addWindow(win) {
@@ -1062,6 +1094,7 @@
     if (!currentPlan || !currentTranslated) return;
 
     setPanel(5, "Đang đổi giọng...", true);
+    holdVideoForSynthesis();
     const videoId = videoIdFromUrl();
     const port = chrome.runtime.connect({ name: "dub-job" });
     let replaced = false;
@@ -1095,6 +1128,7 @@
           .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
       } else if (msg.type === "ERROR") {
         setPanel(0, "Lỗi đổi giọng: " + msg.message, true);
+        resumeVideoAfterSynthesis();
       }
     });
     port.postMessage({

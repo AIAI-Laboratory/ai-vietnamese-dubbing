@@ -318,9 +318,11 @@ On Coursera, turn captions (CC) on first. On YouTube the extension opens the tra
 
 The dot on the button reports state without opening anything:
 
-| Colour         | Meaning                                          |
-| -------------- | ------------------------------------------------ |
-| amber, pulsing | translating or synthesising, nothing to hear yet |
+The video is paused while the dub is being prepared — there is nothing to listen to yet — and starts again on its own the moment the first window arrives. Press play yourself during the wait and it stays yours: the extension will not touch playback again.
+
+| Colour         | Meaning                                                     |
+| -------------- | ----------------------------------------------------------- |
+| amber, pulsing | translating or synthesising, video paused, nothing to hear yet |
 | blue, pulsing  | playing, the rest still rendering                |
 | green          | finished, or served from cache                   |
 | red            | failed — the panel says why                      |

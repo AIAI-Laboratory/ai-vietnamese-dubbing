@@ -419,3 +419,45 @@ test('vào toàn màn hình thì phụ đề chuyển vào trong phần tử ful
   harness.context.document.__fire('fullscreenchange');
   assert.strictEqual(subtitle.parentElement, harness.body);
 });
+
+test('đang tổng hợp thì video dừng, có audio thì tự chạy lại', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+  assert.strictEqual(harness.video.paused, true, 'phải dừng video trong lúc chờ audio');
+
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(harness.video.paused, false, 'cửa sổ đầu về thì phải chạy tiếp');
+});
+
+test('video vốn đang dừng thì không tự chạy khi audio về', async () => {
+  const harness = loadContentScript();
+  harness.video.paused = true;
+  const port = await startJob(harness);
+
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(harness.video.paused, true, 'người xem đang dừng thì để yên');
+});
+
+test('người xem tự bấm play trong lúc chờ thì mình thôi điều khiển', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+  (harness.video.listeners.play || []).forEach((fn) => fn({}));
+  harness.video.paused = true;
+
+  port.__deliver(windowMessage(0, 0, 36, { plan: PLAN, subtitles: SUBTITLES }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(harness.video.paused, true, 'người xem đã giành lại quyền điều khiển');
+});
+
+test('job lỗi thì trả video chạy tiếp, không để treo ở trạng thái dừng', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+  assert.strictEqual(harness.video.paused, true);
+
+  port.__deliver({ type: 'ERROR', message: 'server sập' });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(harness.video.paused, false, 'lỗi thì phải cho xem tiếp bản gốc');
+  assert.strictEqual(statusOf(harness), 'error');
+});

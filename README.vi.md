@@ -318,9 +318,11 @@ Trên Coursera, bật phụ đề (CC) trước. Trên YouTube extension tự m�
 
 Chấm màu trên nút cho biết đang ở bước nào mà không cần mở gì:
 
-| Màu                       | Nghĩa                                      |
-| ------------------------- | ------------------------------------------ |
-| vàng, nhấp nháy           | đang dịch hoặc tổng hợp, chưa nghe được gì |
+Trong lúc chuẩn bị bản lồng tiếng, video được tạm dừng — chưa có gì để nghe — và tự chạy lại ngay khi cửa sổ audio đầu tiên về. Nếu bạn tự bấm play trong lúc chờ thì quyền điều khiển thuộc về bạn: extension không đụng tới việc phát nữa.
+
+| Màu                       | Nghĩa                                                  |
+| ------------------------- | ------------------------------------------------------ |
+| vàng, nhấp nháy           | đang dịch hoặc tổng hợp, video tạm dừng, chưa nghe được gì |
 | xanh dương, nhấp nháy     | đang phát, phần còn lại vẫn đang tổng hợp  |
 | xanh lá                   | xong toàn bộ, hoặc lấy từ cache            |
 | đỏ                        | lỗi — bảng nổi nói rõ lý do                |
