@@ -16,6 +16,13 @@ SAMPLE_RATE = 24000
 SPEED_MAX = 1.15
 VIENEU_STEPS = max(1, int(os.environ.get("VIENEU_STEPS", "16")))
 VIENEU_CFG = float(os.environ.get("VIENEU_CFG", "3.0"))
+VIENEU_MODEL_DIR = Path(
+    os.environ.get("VIENEU_MODEL_DIR", str(Path(__file__).resolve().parent / "models" / "vieneu-nano"))
+)
+_VIENEU_MODEL_FILES = (
+    "text_encoder.onnx", "duration_predictor.onnx", "vector_estimator.onnx",
+    "codec_decoder.onnx", "config.json", "constants.npz",
+)
 
 _LETTER_NAMES = {
     "A": "ây", "B": "bi", "C": "xi", "D": "đi", "E": "ê", "F": "ép", "G": "giê",
@@ -207,7 +214,7 @@ class SynthResult:
     peak: float = 0.0
 
 
-_LEGACY_KOKORO_VOICES = {
+_LEGACY_VOICE_IDS = {
     "diem_trinh", "hung_thinh", "mai_linh", "mai_loan", "manh_dung", "my_yen",
     "ngoc_huyen", "phat_tai", "thanh_dat", "thuc_trinh", "tuan_ngoc", "storyvert",
     "duc_an", "duc_duy",
@@ -233,6 +240,9 @@ class VieneuNanoEngine:
                 steps=VIENEU_STEPS,
                 cfg=VIENEU_CFG,
                 threads=threads,
+                **({"onnx_dir": str(VIENEU_MODEL_DIR)}
+                   if all((VIENEU_MODEL_DIR / name).is_file() for name in _VIENEU_MODEL_FILES)
+                   else {}),
             )
         self._runtime = runtime
         self._voices = self._load_voices()
@@ -273,7 +283,7 @@ class VieneuNanoEngine:
             if voice and voice.strip() != "vi"
             else self._default_voice
         )
-        if name in _LEGACY_KOKORO_VOICES:
+        if name in _LEGACY_VOICE_IDS:
             return self._default_voice
         if name not in self._voices:
             raise ValueError(f"Không có voice VieNeu Nano {name!r}")

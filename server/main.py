@@ -33,9 +33,9 @@ SERVER_DIR = Path(__file__).resolve().parent
 
 load_dotenv(SERVER_DIR / ".env")
 
-# Giữ model cache trong project theo mặc định; HF_HOME vẫn cho phép override.
-MODEL_CACHE_DIR = SERVER_DIR / "models" / "huggingface"
-os.environ.setdefault("HF_HOME", str(MODEL_CACHE_DIR))
+# Model portable trong project; downloader.py chuẩn bị thư mục này trước deploy.
+MODEL_DIR = SERVER_DIR / "models" / "vieneu-nano"
+os.environ.setdefault("VIENEU_MODEL_DIR", str(MODEL_DIR))
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
