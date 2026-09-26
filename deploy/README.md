@@ -6,17 +6,17 @@ extension at it. The server is API-only and always requires an `API_KEY`.
 ## 1. Install (Ubuntu)
 
 ```bash
-sudo apt update && sudo apt install -y ffmpeg python3 python3-venv
+sudo apt update && sudo apt install -y ffmpeg
+curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone <repo-url>
-cd <repo>/server
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+cd <repo>
+uv sync --python 3.12
 ```
 
 ## 2. Set the API key
 
 ```bash
-cp .env.example .env
+cp server/.env.example server/.env
 python3 -c "import secrets; print(secrets.token_hex(16))"   # paste into API_KEY
 ```
 
@@ -26,7 +26,7 @@ The server refuses to start with an empty `API_KEY`.
 
 ```bash
 tmux new -s localdub
-.venv/bin/python main.py
+uv run python server/main.py
 # Ctrl+B then D detaches without stopping it. Reattach: tmux attach -t localdub
 ```
 
@@ -79,8 +79,8 @@ Description=Local AI Vietnamese Dubbing TTS server
 After=network.target
 
 [Service]
-WorkingDirectory=/path/to/repo/server
-ExecStart=/path/to/repo/server/.venv/bin/python main.py
+WorkingDirectory=/path/to/repo
+ExecStart=/path/to/uv run --directory /path/to/repo --no-sync python server/main.py
 Restart=on-failure
 User=your-user
 

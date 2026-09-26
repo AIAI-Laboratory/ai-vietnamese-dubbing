@@ -1,7 +1,7 @@
 # TTS server
 
-FastAPI, API only. Speech synthesis uses Kokoro-Vietnamese ONNX on the local
-CPU, so once the model is downloaded no text reaches a speech provider.
+FastAPI, API only. Speech synthesis uses VieNeu-TTS v3 Nano through ONNX Runtime
+on the local CPU, so once the model is downloaded no text reaches a speech provider.
 
 For the full picture — architecture, timeline anchoring, pronunciation, the
 security model — see the [main README](../README.md).
@@ -12,52 +12,47 @@ security model — see the [main README](../README.md).
 | ------------------- | ----------------------------------------------------------- |
 | `main.py`           | Routes, job queue, job lifecycle, request limits             |
 | `auth.py`           | `X-API-Key` dependency applied to every route                |
-| `tts_engine.py`     | Text normalisation, number reading, synthesis, WAV output    |
+| `tts_engine.py`     | Text normalisation, VieNeu Nano synthesis, WAV output        |
 | `phonemes.py`       | Grapheme to phoneme for Vietnamese text with English terms   |
-| `kokoro_onnx.py`    | ONNX inference on numpy and onnxruntime alone                |
+| `kokoro_onnx.py`    | Legacy Kokoro ONNX implementation kept for tests             |
 | `audio_pipeline.py` | Slot fitting, window assembly, ducking envelope, encoding    |
 
-`kokoro_onnx.py` exists because the upstream `kokoro-vietnamese` package
-declares gradio, torch and transformers as hard dependencies — 670 MB of
-wheels for a server with no interface, where torch was used for a single
-`torch.load` of a 512 KB voicepack. That file is now read directly. Installed
-dependencies came down from 1079 MB to 282 MB, and the audio is bit-identical
-to the upstream ONNX path. Phonemisation still uses `vig2p`, which pulls in
-only `sea-g2p`.
+The active engine is `vieneu.Vieneu(mode="v3nano")`: a 48M-parameter,
+24 kHz Vietnamese model that runs torch-free on ONNX Runtime. Its Hugging Face
+cache is stored under `server/models/huggingface/` by default; set `HF_HOME` to
+override that location.
 
 ## Install
 
 ```bash
-cd server
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt   # Windows
-# .venv/bin/pip install -r requirements.txt     # macOS/Linux
+cd ..
+uv sync --python 3.12
 
-copy .env.example .env                          # Windows
-# cp .env.example .env                          # macOS/Linux
+copy server/.env.example server/.env             # Windows
+# cp server/.env.example server/.env             # macOS/Linux
 python -c "import secrets; print(secrets.token_hex(16))"
 ```
+
+`uv sync` owns the root `.venv/`; do not create or activate another virtualenv.
 
 Paste the generated key into `API_KEY` in `.env`. Python 3.12 and `ffmpeg` on
 `PATH` are required; the server refuses to start without either the key or
 ffmpeg.
 
-The first start downloads the ONNX model (about 311 MB), its config and the
-default voicepack from Hugging Face, pinned to revision `9f210d6`. Later starts
-use the local cache; `HF_HOME` controls where that lives.
+The first start downloads the Nano ONNX graphs and preset voices from Hugging
+Face (about 280 MB). Later starts use the project-local cache.
 
 ## Run
 
 ```bash
-.venv/Scripts/python main.py     # Windows
-# .venv/bin/python main.py       # macOS/Linux
+uv run python server/main.py
 ```
 
 The default address is `http://127.0.0.1:18765`, overridable through `.env` or
 flags:
 
 ```bash
-.venv/bin/python main.py --host 0.0.0.0 --port 9000
+uv run python server/main.py --host 0.0.0.0 --port 9000
 ```
 
 Logs go to the console and to `local-ai-vi-dub/server.log` in the OS temp
@@ -79,15 +74,13 @@ voice on the target machine.
 
 ## Engine
 
-`tts_engine.KokoroOnnxEngine` keeps one ONNX session warm for the process
-lifetime. Voicepacks load on demand and are cached without a second copy of
-the model. One job runs at a time; within a job, `SYNTH_WORKERS` sentences are
-synthesised in parallel (3 by default), which took the real-time factor from
-0.397 to 0.232 on six cores.
+`tts_engine.VieneuNanoEngine` keeps one ONNX runtime warm for the process
+lifetime. One job runs at a time; within a job, `SYNTH_WORKERS` sentences are
+synthesised in parallel (3 by default).
 
-`KOKORO_VOICE` picks the default voice, and `GET /api/voices` lists all voice
-ids. Extension settings still holding the old gTTS voice id `vi` fall back to
-the configured Kokoro default.
+`VIENEU_VOICE` picks the default voice, and `GET /api/voices` lists all voice
+ids. Extension settings still holding old Kokoro voice ids or gTTS voice id
+`vi` fall back to the configured VieNeu default.
 
 Before synthesis, text goes through `normalize_for_speech`: technical acronyms
 such as API, HTTPS, JSON, CPU and GPU become Vietnamese spoken forms, digits
@@ -98,7 +91,7 @@ onto Vietnamese sounds. Subtitle text is left untouched.
 
 ```text
 GET    /api/health               -> loading | ready | error
-GET    /api/voices               -> available Kokoro voices
+GET    /api/voices               -> available VieNeu Nano voices
 POST   /api/preview              -> WAV for one sentence
 POST   /api/synthesize           -> { jobId }
 GET    /api/job/{jobId}          -> queued | running | done | error | cancelled
@@ -121,9 +114,9 @@ slice of video it covers.
 ## Checks
 
 ```bash
-python -m compileall -q .
-python -m pip check
-python -m unittest discover -s ../tests -t ../tests
+uv run python -m compileall -q server tests
+uv pip check
+uv run python -m unittest discover -s tests -t tests
 ```
 
 ## Known limitations

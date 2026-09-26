@@ -7,8 +7,8 @@
 [![Phiên bản](https://img.shields.io/badge/version-0.4.0-blue)](#lịch-sử-phiên-bản)
 [![Giấy phép](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)](extension/manifest.json)
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](server/requirements.txt)
-[![Kiểm thử](https://img.shields.io/badge/tests-44%20JS%20%2B%2065%20Python-success)](#kiểm-thử)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Kiểm thử](https://img.shields.io/badge/tests-50%20JS%20%2B%2073%20Python-success)](#kiểm-thử)
 
 [English](README.md) · [Tài liệu server](server/README.md) · [Chạy trên máy khác](deploy/README.md)
 
@@ -44,7 +44,7 @@
 
 Thuyết minh tiếng Việt cho **bài giảng Coursera** và **video YouTube**, khớp đúng dòng thời gian của video.
 
-Nó đọc phụ đề tiếng Anh sẵn có, dịch qua Gemini API chính thức, tổng hợp giọng nói bằng Kokoro-Vietnamese ONNX ngay trên máy bạn, rồi phát chồng lên video. Tua tới đâu cũng đúng ngay: audio được neo theo mốc thời gian tuyệt đối, nên nhảy tới bất kỳ đâu chỉ là một phép gán chứ không phải nạp lại bộ đệm.
+Nó đọc phụ đề tiếng Anh sẵn có, dịch qua Gemini API chính thức, tổng hợp giọng nói bằng VieNeu-TTS v3 Nano ONNX ngay trên máy bạn, rồi phát chồng lên video. Tua tới đâu cũng đúng ngay: audio được neo theo mốc thời gian tuyệt đối, nên nhảy tới bất kỳ đâu chỉ là một phép gán chứ không phải nạp lại bộ đệm.
 
 **Dữ liệu ở lại máy bạn.** Chỉ phần chữ của phụ đề được gửi tới Gemini. Giọng nói tổng hợp trên chính CPU của bạn sau một lần tải model — bản dịch không đi tới dịch vụ giọng nói nào, video và audio không rời khỏi máy.
 
@@ -52,7 +52,7 @@ Nó đọc phụ đề tiếng Anh sẵn có, dịch qua Gemini API chính thứ
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **Nghe được sau ~4 giây**      | Audio về theo cửa sổ ~30 giây và phát ngay trong lúc phần sau còn đang tổng hợp, thay vì chờ ~80 giây cho cả bài                        |
 | **Giữ được nhạc nền**          | Nhạc, tiếng vỗ tay, hiệu ứng vẫn nghe thấy: tiếng gốc được hạ xuống dưới giọng thuyết minh theo đường bao lấy từ chính bản lồng tiếng   |
-| **Chỉ cần CPU**                | 0,23–0,32× thời gian thực trên laptop 6 nhân, ba câu tổng hợp song song. Không GPU, không PyTorch                                       |
+| **Chỉ cần CPU**                | VieNeu Nano được công bố ở mức 0,11–0,22× thời gian thực trên CPU desktop, ba câu tổng hợp song song. Không GPU, không PyTorch                 |
 | **Đọc đúng chữ lẫn số lẫn Anh**| Chữ số được đọc thành lời, còn thuật ngữ tiếng Anh được đọc theo cách người Việt đọc thay vì áp luật chính tả tiếng Việt lên chúng      |
 | **Phụ đề song ngữ**            | Tiếng Việt kèm bản gốc tiếng Anh, kéo thả được, ba cỡ chữ và ba bộ màu                                                                 |
 | **Tự hiệu chỉnh**              | Server đo tốc độ đọc thật của giọng sau mỗi lần chạy và trả về, nên câu dịch được cấp đúng số âm tiết audio thật sự chứa được           |
@@ -81,7 +81,7 @@ flowchart TB
         F["main.py<br/>route · hàng đợi job"]
         G["tts_engine.py<br/>chuẩn hoá chữ"]
         H["phonemes.py<br/>G2P hai ngôn ngữ"]
-        I["kokoro_onnx.py<br/>ONNX, 3 worker"]
+        I["VieNeu-TTS v3 Nano<br/>ONNX, 3 worker"]
         J["audio_pipeline.py<br/>nén vừa khe · cửa sổ · ducking"]
     end
 
@@ -178,7 +178,7 @@ Lúc đang phát, trang giữ độ khớp đó:
 
 Vòng kiểm tra chạy mỗi 250 ms, và chạy thêm khi có `seeking`, `ratechange`, `play`. Tua không bao giờ là vấn đề đồng bộ: công thức cho ra vị trí đúng ngay lập tức.
 
-**Nhét câu vào đúng khe.** Câu dài hơn khoảng trống trước câu kế được đọc lại bằng tốc độ native của Kokoro (tối đa 1,15×, giữ nguyên ngữ điệu), vẫn dư thì nén bằng `atempo`, và chỉ cắt bớt khi hết cách. Mỗi câu được mượn khoảng lặng phía sau nó, nên phần lớn câu không cần tới bước nào ở trên.
+**Nhét câu vào đúng khe.** Câu dài hơn khoảng trống trước câu kế được đọc lại bằng tốc độ native của VieNeu Nano (tối đa 1,15×, giữ nguyên ngữ điệu), vẫn dư thì nén bằng `atempo`, và chỉ cắt bớt khi hết cách. Mỗi câu được mượn khoảng lặng phía sau nó, nên phần lớn câu không cần tới bước nào ở trên.
 
 **Ducking.** Server lấy đường bao RMS từ chính bản lồng tiếng (20 khung/giây, lên 0,08 s, xuống 0,40 s) và gửi kèm mỗi cửa sổ. Trang nhân âm lượng gốc của video với đường bao đó: 0,10 khi đang đọc, 0,35 lúc nghỉ, nên nhạc và tiếng vỗ tay vẫn còn.
 
@@ -195,7 +195,7 @@ flowchart TD
     C --> D{"sea_g2p vừa tra<br/>từ điển nào?"}
     D -->|tiếng Việt| E["luật vig2p<br/>thanh điệu, phụ âm quặt lưỡi"]
     D -->|tiếng Anh| F["ánh xạ về âm tiếng Việt<br/>server đọc sơ-vơ"]
-    E --> G["id phoneme → Kokoro ONNX"]
+    E --> G["VieNeu Nano ONNX"]
     F --> G
 
     classDef prep fill:#dbeafe,stroke:#1d4ed8,color:#0b1220
@@ -242,11 +242,11 @@ server/                     TTS server FastAPI, chỉ API
 ├── auth.py                 X-API-Key cho mọi route
 ├── tts_engine.py           Chuẩn hoá chữ, đọc số, xuất WAV
 ├── phonemes.py             G2P cho câu lẫn hai thứ tiếng
-├── kokoro_onnx.py          Inference ONNX chỉ bằng numpy
+├── kokoro_onnx.py          Bản Kokoro cũ, giữ lại cho test
 ├── audio_pipeline.py       Nén vừa khe, cắt cửa sổ, đường bao ducking
 └── .env.example            Mọi thiết lập, có giải thích
 
-tests/                      44 test JavaScript + 65 test Python
+tests/                      50 test JavaScript + 73 test Python
 deploy/                     Chạy server trên máy khác
 ```
 
@@ -256,12 +256,13 @@ deploy/                     Chạy server trên máy khác
 
 - **Chrome** 116 trở lên (Manifest V3)
 - **Python** 3.12
+- **uv** — trình quản lý dependency và môi trường Python
 - **ffmpeg** trong `PATH` — thiếu là server từ chối khởi động
   - Windows: `winget install Gyan.FFmpeg`
   - Debian/Ubuntu: `apt install ffmpeg`
   - macOS: `brew install ffmpeg`
 - Một **Gemini API key** ([aistudio.google.com](https://aistudio.google.com/apikey))
-- Khoảng 300 MB cho model Kokoro, tải một lần ở lần chạy đầu
+- Khoảng 280 MB cho model VieNeu Nano, tải một lần vào `server/models/`
 
 ---
 
@@ -269,15 +270,17 @@ deploy/                     Chạy server trên máy khác
 
 ### 1. TTS server
 
-```bash
-cd server
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt      # Windows
-# .venv/bin/pip install -r requirements.txt        # macOS/Linux
+Cài uv nếu máy chưa có: xem [hướng dẫn cài uv chính thức](https://docs.astral.sh/uv/getting-started/installation/).
 
-copy .env.example .env                             # Windows
-# cp .env.example .env                             # macOS/Linux
+```bash
+uv sync --python 3.12
+
+copy server/.env.example server/.env                # Windows
+# cp server/.env.example server/.env                # macOS/Linux
 ```
+
+`uv sync` tạo môi trường do uv quản lý tại `.venv/` ở thư mục gốc repo. Không
+cần tự tạo hoặc activate một virtualenv riêng.
 
 Sinh một API key rồi điền vào `server/.env`. Server từ chối khởi động nếu để trống, vì bất kỳ thứ gì mở được socket tới nó đều gọi được:
 
@@ -288,10 +291,10 @@ python -c "import secrets; print(secrets.token_hex(16))"
 Chạy server:
 
 ```bash
-.venv/Scripts/python main.py
+uv run python server/main.py
 ```
 
-Chờ dòng `Engine sẵn sàng: Kokoro-Vietnamese ONNX (CPU, local)`. Lần chạy đầu sẽ tải model.
+Chờ dòng `Engine sẵn sàng: VieNeu-TTS v3 Nano (ONNX, CPU, local)`. Lần chạy đầu sẽ tải model vào `server/models/`.
 
 ### 2. Extension
 
@@ -340,7 +343,7 @@ Bấm vào nút khi đã có bản lồng tiếng thì bảng điều khiển m�
 | Gemini API key                 | —                        | bắt buộc; model cố định là `gemini-3.1-flash-lite`      |
 | Server URL                     | `http://127.0.0.1:18765` | TTS server nào truy cập được cũng dùng được            |
 | Server API key                 | —                        | phải trùng `API_KEY` trong `server/.env`               |
-| Giọng đọc                      | `diem_trinh`             | 14 giọng Kokoro, lấy danh sách qua `GET /api/voices`   |
+| Giọng đọc                      | `Adam`                   | Giọng VieNeu Nano, lấy danh sách qua `GET /api/voices` |
 | Âm tiết mỗi giây               | `3.8`                    | tự hiệu chỉnh sau mỗi lần chạy; chỉ sửa khi muốn ép    |
 | Phụ đề                         | Việt bật, Anh bật        | vị trí, cỡ chữ và bộ màu nằm trong popup               |
 | Âm lượng thuyết minh / tiếng nền | 1.0 / 1.0              | tiếng nền được nhân với đường bao ducking              |
@@ -353,7 +356,9 @@ Bấm vào nút khi đã có bản lồng tiếng thì bảng điều khiển m�
 | `HOST`               | `127.0.0.1`  | địa chỉ lắng nghe                                                |
 | `PORT`               | `18765`      | cổng                                                             |
 | `LOG_LEVEL`          | `INFO`       | mức log                                                          |
-| `KOKORO_VOICE`       | `diem_trinh` | giọng mặc định                                                   |
+| `VIENEU_VOICE`       | `Adam`       | giọng VieNeu Nano mặc định                                      |
+| `VIENEU_STEPS`       | `16`         | cân bằng chất lượng/tốc độ; 8 nhanh hơn nhưng thô hơn           |
+| `VIENEU_CFG`         | `3.0`        | classifier-free guidance                                        |
 | `JOB_RETENTION_MIN`  | `60`         | job xong bao nhiêu phút thì audio bị xoá                         |
 | `MAX_PENDING_JOBS`   | `4`          | số job chờ/đang chạy trước khi `/api/synthesize` trả 429         |
 | `MAX_BODY_MB`        | `16`         | trần body, tính theo số byte thật nhận được                      |
@@ -488,10 +493,10 @@ Phần phát giữ một thẻ `<audio>` cho mỗi cửa sổ. Cửa sổ có th
 
 ```bash
 node --test tests/*.test.js
-server/.venv/Scripts/python -m unittest discover -s tests -t tests
+uv run python -m unittest discover -s tests -t tests
 ```
 
-44 test JavaScript và 65 test Python. Nhóm JavaScript chạy chính `background.js` và `content.js` thật trong `vm` với `chrome`, `fetch` và DOM giả lập, nên kiểm đúng code sẽ chạy chứ không phải bản sao. Nhóm Python phủ API, pipeline audio và phần G2P hai ngôn ngữ.
+50 test JavaScript và 73 test Python. Nhóm JavaScript chạy chính `background.js` và `content.js` thật trong `vm` với `chrome`, `fetch` và DOM giả lập, nên kiểm đúng code sẽ chạy chứ không phải bản sao. Nhóm Python phủ API, pipeline audio, wrapper TTS và phần G2P hai ngôn ngữ.
 
 ---
 
@@ -531,10 +536,10 @@ server/.venv/Scripts/python -m unittest discover -s tests -t tests
 
 ## Ghi công và giấy phép
 
-Giọng đọc dùng [Kokoro-Vietnamese](https://huggingface.co/contextboxai/Kokoro-Vietnamese) (Apache-2.0), phần chuyển chữ sang âm dùng [vig2p](https://pypi.org/project/vig2p/) trên nền `sea-g2p`. Bộ icon lấy từ [Lucide](https://lucide.dev) (MIT).
+Giọng đọc dùng [VieNeu-TTS v3 Nano](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Nano) (Apache-2.0). Bộ icon lấy từ [Lucide](https://lucide.dev) (MIT).
 
 **Hà Trọng Nguyễn** — [github.com/htrnguyen](https://github.com/htrnguyen)
 
 Thuộc **AIAI Lab** — [github.com/AIAI-Laboratory](https://github.com/AIAI-Laboratory)
 
-Bản quyền © 2026 Hà Trọng Nguyễn, AIAI Lab. Phát hành theo [Apache License 2.0](LICENSE) — cùng giấy phép với Kokoro-Vietnamese, thứ mà `server/kokoro_onnx.py` viết lại một phần.
+Bản quyền © 2026 Hà Trọng Nguyễn, AIAI Lab. Phát hành theo [Apache License 2.0](LICENSE).

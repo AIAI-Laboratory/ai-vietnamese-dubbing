@@ -7,8 +7,8 @@
 [![Version](https://img.shields.io/badge/version-0.4.0-blue)](#version-history)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)](extension/manifest.json)
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](server/requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-44%20JS%20%2B%2065%20Python-success)](#testing)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-50%20JS%20%2B%2073%20Python-success)](#testing)
 
 [Tiếng Việt](README.vi.md) · [Server reference](server/README.md) · [Remote deployment](deploy/README.md)
 
@@ -44,7 +44,7 @@
 
 A Chrome extension that dubs **Coursera lectures** and **YouTube videos** into Vietnamese, in sync with the video timeline.
 
-It reads the video's existing English captions, translates them with the official Gemini API, synthesises speech locally with Kokoro-Vietnamese ONNX, and plays the result over the video. Seeking is instant: audio is anchored to absolute timestamps, so jumping anywhere is a single assignment rather than a buffer refill.
+It reads the video's existing English captions, translates them with the official Gemini API, synthesises speech locally with VieNeu-TTS v3 Nano ONNX, and plays the result over the video. Seeking is instant: audio is anchored to absolute timestamps, so jumping anywhere is a single assignment rather than a buffer refill.
 
 **Your data stays put.** Only caption text goes to Gemini. Speech synthesis runs on your own CPU after a one-time model download — the translated text never reaches a speech provider, and neither video nor audio leaves the machine.
 
@@ -52,7 +52,7 @@ It reads the video's existing English captions, translates them with the officia
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Starts in ~4 seconds**      | Audio arrives in ~30-second windows and plays while the rest is still rendering, instead of waiting ~80 seconds for the whole lecture                     |
 | **Keeps the background**      | Music, applause and effects stay audible: the original track is ducked under the dub by an envelope derived from the dub itself, not muted                |
-| **CPU only**                  | 0.23–0.32× real time on a 6-core laptop, three sentences synthesised in parallel. No GPU, no PyTorch                                                      |
+| **CPU only**                  | VieNeu Nano is reported at 0.11–0.22× real time on desktop CPU, three sentences synthesised in parallel. No GPU, no PyTorch                              |
 | **Reads mixed text properly** | Vietnamese numbers are spelled out, and English terms are pronounced the way a Vietnamese speaker says them rather than through Vietnamese spelling rules |
 | **Bilingual subtitles**       | Vietnamese and the English original, draggable, three sizes and three colour presets                                                                     |
 | **Self-calibrating**          | The server measures the voice's real speaking rate each job and feeds it back, so translations are sized for what can actually be spoken                  |
@@ -81,7 +81,7 @@ flowchart TB
         F["main.py<br/>routes · job queue"]
         G["tts_engine.py<br/>text normalisation"]
         H["phonemes.py<br/>bilingual G2P"]
-        I["kokoro_onnx.py<br/>ONNX inference, 3 workers"]
+        I["VieNeu-TTS v3 Nano<br/>ONNX inference, 3 workers"]
         J["audio_pipeline.py<br/>slot fitting · windows · ducking"]
     end
 
@@ -178,7 +178,7 @@ The page keeps that alignment while playing:
 
 The check runs every 250 ms and on `seeking`, `ratechange` and `play`. A seek is never a resync problem: the formula gives the right position immediately.
 
-**Fitting speech into its slot.** A sentence longer than the gap before the next one is re-synthesised at Kokoro's native speed (up to 1.15×, which preserves prosody), then compressed with `atempo` if still over, and trimmed only as a last resort. Each sentence borrows the silence that follows it, so most need none of this.
+**Fitting speech into its slot.** A sentence longer than the gap before the next one is re-synthesised at VieNeu Nano's native speed (up to 1.15×, which preserves prosody), then compressed with `atempo` if still over, and trimmed only as a last resort. Each sentence borrows the silence that follows it, so most need none of this.
 
 **Ducking.** The server derives an RMS envelope from the dub itself (20 fps, 0.08 s attack, 0.40 s release) and ships it with each window. The page multiplies the video's own volume by it: 0.10 while the dub speaks, 0.35 in the gaps, so music and applause stay present.
 
@@ -195,7 +195,7 @@ flowchart TD
     C --> D{"which dictionary<br/>did sea_g2p use?"}
     D -->|Vietnamese| E["vig2p rules<br/>tones, retroflex onsets"]
     D -->|English| F["map onto Vietnamese sounds<br/>server reads sơ-vơ"]
-    E --> G["phoneme ids → Kokoro ONNX"]
+    E --> G["VieNeu Nano ONNX"]
     F --> G
 
     classDef prep fill:#dbeafe,stroke:#1d4ed8,color:#0b1220
@@ -242,11 +242,11 @@ server/                     FastAPI TTS server, API only
 ├── auth.py                 X-API-Key on every route
 ├── tts_engine.py           Text normalisation, number reading, WAV output
 ├── phonemes.py             Bilingual grapheme-to-phoneme conversion
-├── kokoro_onnx.py          ONNX inference on numpy alone
+├── kokoro_onnx.py          Legacy Kokoro implementation kept for tests
 ├── audio_pipeline.py       Slot fitting, windowing, ducking envelope
 └── .env.example            Every setting, documented
 
-tests/                      44 JavaScript + 65 Python tests
+tests/                      50 JavaScript + 73 Python tests
 deploy/                     Running the server on another machine
 ```
 
@@ -256,12 +256,13 @@ deploy/                     Running the server on another machine
 
 - **Chrome** 116+ (Manifest V3)
 - **Python** 3.12
+- **uv** — Python dependency and environment manager
 - **ffmpeg** on `PATH` — the server refuses to start without it
   - Windows: `winget install Gyan.FFmpeg`
   - Debian/Ubuntu: `apt install ffmpeg`
   - macOS: `brew install ffmpeg`
 - A **Gemini API key** ([aistudio.google.com](https://aistudio.google.com/apikey))
-- ~300 MB for the Kokoro model, downloaded once on first run
+- ~280 MB for the VieNeu Nano model, downloaded once into `server/models/`
 
 ---
 
@@ -269,15 +270,17 @@ deploy/                     Running the server on another machine
 
 ### 1. TTS server
 
-```bash
-cd server
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt      # Windows
-# .venv/bin/pip install -r requirements.txt        # macOS/Linux
+Install uv if it is not installed yet: see the [official uv installation guide](https://docs.astral.sh/uv/getting-started/installation/).
 
-copy .env.example .env                             # Windows
-# cp .env.example .env                             # macOS/Linux
+```bash
+uv sync --python 3.12
+
+copy server/.env.example server/.env                # Windows
+# cp server/.env.example server/.env                # macOS/Linux
 ```
+
+`uv sync` creates the uv-managed project environment at `.venv/` in the
+repository root. Do not create or activate a separate Python virtualenv.
 
 Generate an API key and put it in `server/.env`. The server refuses to start without one, because anything that can open a socket to it can otherwise use it:
 
@@ -288,10 +291,10 @@ python -c "import secrets; print(secrets.token_hex(16))"
 Start it:
 
 ```bash
-.venv/Scripts/python main.py
+uv run python server/main.py
 ```
 
-Wait for `Engine sẵn sàng: Kokoro-Vietnamese ONNX (CPU, local)`. The first start downloads the model.
+Wait for `Engine sẵn sàng: VieNeu-TTS v3 Nano (ONNX, CPU, local)`. The first start downloads the model into `server/models/`.
 
 ### 2. Extension
 
@@ -340,7 +343,7 @@ Clicking the button while a dub is loaded opens the panel: switch between origin
 | Gemini API key                 | —                         | required; the model is fixed to `gemini-3.1-flash-lite` |
 | Server URL                     | `http://127.0.0.1:18765`  | any reachable TTS server                              |
 | Server API key                 | —                         | must match `API_KEY` in `server/.env`                 |
-| Voice                          | `diem_trinh`              | 14 Kokoro voices, listed by `GET /api/voices`         |
+| Voice                          | `Adam`                    | VieNeu Nano voices, listed by `GET /api/voices`      |
 | Syllables per second           | `3.8`                     | self-calibrates after each job; edit only to override |
 | Subtitles                      | Vietnamese on, English on | position, size and colour preset live in the popup    |
 | Dub volume / background volume | 1.0 / 1.0                 | background multiplies the ducking envelope            |
@@ -353,7 +356,9 @@ Clicking the button while a dub is loaded opens the panel: switch between origin
 | `HOST`               | `127.0.0.1`  | bind address                                                  |
 | `PORT`               | `18765`      | port                                                          |
 | `LOG_LEVEL`          | `INFO`       | log verbosity                                                 |
-| `KOKORO_VOICE`       | `diem_trinh` | default voice                                                 |
+| `VIENEU_VOICE`       | `Adam`       | default VieNeu Nano voice                                   |
+| `VIENEU_STEPS`       | `16`         | quality/speed trade-off; 8 is faster but rougher             |
+| `VIENEU_CFG`         | `3.0`        | classifier-free guidance                                     |
 | `JOB_RETENTION_MIN`  | `60`         | minutes before a finished job's audio is deleted              |
 | `MAX_PENDING_JOBS`   | `4`          | queued or running jobs before `/api/synthesize` returns 429   |
 | `MAX_BODY_MB`        | `16`         | request body ceiling, counted in real bytes                   |
@@ -488,10 +493,10 @@ Measured on a Ryzen 5 5600H (6 cores), CPU only, a 10-minute lecture of 50 sente
 
 ```bash
 node --test tests/*.test.js
-server/.venv/Scripts/python -m unittest discover -s tests -t tests
+uv run python -m unittest discover -s tests -t tests
 ```
 
-44 JavaScript tests and 65 Python tests. The JavaScript ones run the real `background.js` and `content.js` inside a `vm` with `chrome`, `fetch` and the DOM mocked, so they exercise shipped code rather than a copy of it. The Python ones cover the API surface, the audio pipeline and the bilingual G2P.
+50 JavaScript tests and 73 Python tests. The JavaScript ones run the real `background.js` and `content.js` inside a `vm` with `chrome`, `fetch` and the DOM mocked, so they exercise shipped code rather than a copy of it. The Python ones cover the API surface, the audio pipeline, the TTS wrapper and the bilingual G2P.
 
 ---
 
@@ -531,10 +536,10 @@ server/.venv/Scripts/python -m unittest discover -s tests -t tests
 
 ## Credits and licence
 
-Speech synthesis uses [Kokoro-Vietnamese](https://huggingface.co/contextboxai/Kokoro-Vietnamese) (Apache-2.0), with grapheme-to-phoneme conversion by [vig2p](https://pypi.org/project/vig2p/) over `sea-g2p`. Icons are from [Lucide](https://lucide.dev) (MIT).
+Speech synthesis uses [VieNeu-TTS v3 Nano](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Nano) (Apache-2.0). Icons are from [Lucide](https://lucide.dev) (MIT).
 
 **Hà Trọng Nguyễn** — [github.com/htrnguyen](https://github.com/htrnguyen)
 
 Part of **AIAI Lab** — [github.com/AIAI-Laboratory](https://github.com/AIAI-Laboratory)
 
-Copyright © 2026 Hà Trọng Nguyễn, AIAI Lab. Licensed under the [Apache License 2.0](LICENSE) — the same licence as Kokoro-Vietnamese, part of which `server/kokoro_onnx.py` reimplements.
+Copyright © 2026 Hà Trọng Nguyễn, AIAI Lab. Licensed under the [Apache License 2.0](LICENSE).
