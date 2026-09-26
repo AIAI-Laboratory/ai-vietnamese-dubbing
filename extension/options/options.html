@@ -56,48 +56,18 @@
   </svg>
 
   <div class="shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-icon"><svg class="icon"><use href="#i-mic"/></svg></div>
-        <div class="brand-text">
-          <strong>Local AI Vietnamese Dubbing</strong>
-          <span>Thuyết minh tiếng Việt cho Coursera</span>
-        </div>
-      </div>
-
-      <nav class="nav" id="tabNav">
-        <button type="button" class="nav-item active" data-tab="tab-translate">
-          <svg class="icon"><use href="#i-globe"/></svg>
-          <span>Dịch</span>
-          <small>API EN → VI</small>
-        </button>
-        <button type="button" class="nav-item" data-tab="tab-voice">
-          <svg class="icon"><use href="#i-server"/></svg>
-          <span>Giọng đọc</span>
-          <small>TTS server</small>
-        </button>
-      </nav>
-
-      <div class="sidebar-foot">
-        <div class="theme-switch" id="themeSwitch" role="group" aria-label="Giao diện">
-          <button type="button" data-theme-choice="light" title="Sáng" aria-label="Giao diện sáng"><svg class="icon"><use href="#i-sun"/></svg></button>
-          <button type="button" data-theme-choice="dark" title="Tối" aria-label="Giao diện tối"><svg class="icon"><use href="#i-moon"/></svg></button>
-          <button type="button" data-theme-choice="system" title="Theo hệ thống" aria-label="Giao diện theo hệ thống"><svg class="icon"><use href="#i-monitor"/></svg></button>
-        </div>
-        <p class="sidebar-hint">
-          Âm lượng, phụ đề và cache chỉnh trong <b>popup icon extension</b> trên toolbar —
-          trang này chỉ cấu hình API dịch và giọng đọc.
-        </p>
-      </div>
-    </aside>
-
     <main class="content">
       <header class="content-head">
         <div>
-          <h1 id="contentTitle">Dịch</h1>
-          <p id="contentSub" class="content-sub">Gemini API chính thức, chỉ cần một API key.</p>
+          <h1 id="contentTitle">Cài đặt</h1>
+          <p id="contentSub" class="content-sub">Dịch, server giọng đọc và đồng bộ — tất cả trên một trang.</p>
         </div>
         <div class="content-head-actions">
+          <div class="theme-switch" id="themeSwitch" role="group" aria-label="Giao diện">
+            <button type="button" data-theme-choice="light" title="Sáng" aria-label="Giao diện sáng"><svg class="icon"><use href="#i-sun"/></svg></button>
+            <button type="button" data-theme-choice="dark" title="Tối" aria-label="Giao diện tối"><svg class="icon"><use href="#i-moon"/></svg></button>
+            <button type="button" data-theme-choice="system" title="Theo hệ thống" aria-label="Giao diện theo hệ thống"><svg class="icon"><use href="#i-monitor"/></svg></button>
+          </div>
           <span id="saveStatus" class="status status-inline"></span>
           <button id="btnSave" type="button" class="btn btn-primary">
             <svg class="icon"><use href="#i-check"/></svg>Lưu cài đặt
@@ -126,7 +96,7 @@
       </section>
 
       <section id="tab-voice" class="tab-panel">
-        <p class="tab-note">Server và Kokoro-Vietnamese chạy trên máy bạn; audio, video và bản dịch không được gửi tới dịch vụ giọng nói.
+        <p class="tab-note">Server và VieNeu Nano chạy trên máy bạn; audio, video và bản dịch không được gửi tới dịch vụ giọng nói.
           Xem hướng dẫn cài model trong <code>server/README.md</code>.</p>
 
         <div class="card">
@@ -171,6 +141,25 @@
             số này tự hiệu chỉnh theo tốc độ đọc thật của giọng đang dùng, nên
             thường không cần sửa tay.
           </p>
+        </div>
+
+        <div class="card support-card">
+          <div class="card-head"><svg class="icon"><use href="#i-globe"/></svg><h2>Trang hỗ trợ</h2></div>
+          <p class="field-hint support-lead">Chọn nơi extension được phép hiện nút thuyết minh. Bỏ tick để tắt trang đó; tải lại tab video sau khi lưu.</p>
+          <div class="site-list">
+            <label class="site-toggle" for="siteCoursera">
+              <span class="site-mark">C</span>
+              <span class="site-copy"><strong>Coursera</strong><small>www.coursera.org</small></span>
+              <input type="checkbox" id="siteCoursera">
+              <span class="site-check" aria-hidden="true"></span>
+            </label>
+            <label class="site-toggle" for="siteYoutube">
+              <span class="site-mark site-mark-youtube">▶</span>
+              <span class="site-copy"><strong>YouTube</strong><small>www.youtube.com</small></span>
+              <input type="checkbox" id="siteYoutube">
+              <span class="site-check" aria-hidden="true"></span>
+            </label>
+          </div>
         </div>
       </section>
     </main>

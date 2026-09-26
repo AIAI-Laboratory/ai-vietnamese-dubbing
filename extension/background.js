@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
   serverUrl: 'http://127.0.0.1:18765',
   serverApiKey: '',
   voice: '',
+  supportedSites: { coursera: true, youtube: true },
 
   viSyllablesPerSec: 3.8,
 
@@ -71,7 +72,14 @@ async function waitForApiCooldown() {
 
 async function loadSettings() {
   const stored = await chrome.storage.local.get('settings');
-  const settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    ...(stored.settings || {}),
+    supportedSites: {
+      ...DEFAULT_SETTINGS.supportedSites,
+      ...((stored.settings && stored.settings.supportedSites) || {}),
+    },
+  };
   let changed = false;
   if (settings.planVersion !== DEFAULT_SETTINGS.planVersion) {
     settings.planVersion = DEFAULT_SETTINGS.planVersion;
@@ -886,7 +894,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'FETCH_TTS_VOICES') {
     loadSettings()
-      .then((settings) => fetchVoices(settings.serverUrl, settings.serverApiKey, msg.timeoutMs))
+      .then((settings) => fetchVoices(
+        typeof msg.serverUrl === 'string' ? msg.serverUrl : settings.serverUrl,
+        typeof msg.serverApiKey === 'string' ? msg.serverApiKey : settings.serverApiKey,
+        msg.timeoutMs,
+      ))
       .then((voices) => sendResponse({ ok: true, voices }))
       .catch((e) => sendResponse({ ok: false, error: e.message }));
     return true;
@@ -894,7 +906,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'TTS_PREVIEW_LOCAL') {
     loadSettings()
       .then((settings) => previewVoice(
-        settings.serverUrl, settings.serverApiKey, msg.text, msg.voice, msg.timeoutMs,
+        typeof msg.serverUrl === 'string' ? msg.serverUrl : settings.serverUrl,
+        typeof msg.serverApiKey === 'string' ? msg.serverApiKey : settings.serverApiKey,
+        msg.text, msg.voice, msg.timeoutMs,
       ))
       .then(({ base64, mime }) => sendResponse({ ok: true, base64, mime }))
       .catch((e) => sendResponse({ ok: false, error: e.message }));

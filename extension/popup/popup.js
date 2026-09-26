@@ -1,4 +1,4 @@
-/** Popup icon extension — nơi chỉnh nhanh mọi thứ TRỪ API dịch/giọng đọc (Gemini API key và giọng đọc nằm ở trang Cài đặt, xem options/options.js). */
+/** Popup icon extension — chỉnh playback, captions và voice; API Gemini nằm ở Options. */
 
 const DEFAULTS = {
   dubVolume: 1.0,
@@ -10,6 +10,7 @@ const DEFAULTS = {
   subtitleColor: 'white-black',
   subtitleOffsetX: 0,
   subtitleOffsetY: 0,
+  voice: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -24,6 +25,15 @@ async function saveFields(patch) {
   const stored = await chrome.storage.local.get('settings');
   const settings = { ...(stored.settings || {}), ...patch };
   await chrome.storage.local.set({ settings });
+}
+
+let dirty = false;
+
+function markDirty() {
+  dirty = true;
+  $('btnSavePopup').textContent = 'Lưu thay đổi *';
+  $('popupSaveStatus').textContent = 'Có thay đổi chưa lưu.';
+  $('popupSaveStatus').className = 'status-sm';
 }
 
 function fillSlider(el) {
@@ -52,32 +62,88 @@ async function loadControls() {
   $('subtitlePosition').value = s.subtitlePosition;
   $('subtitleSize').value = s.subtitleSize;
   $('subtitleColor').value = s.subtitleColor;
+  await loadVoiceOptions(s);
+}
+
+async function loadVoiceOptions(settings) {
+  const select = $('popupVoice');
+  const status = $('popupVoiceStatus');
+  const res = await chrome.runtime.sendMessage({
+    type: 'FETCH_TTS_VOICES',
+    serverUrl: settings.serverUrl || 'http://127.0.0.1:18765',
+    serverApiKey: settings.serverApiKey || '',
+    timeoutMs: 15000,
+  }).catch((error) => ({ ok: false, error: error.message }));
+  if (!res.ok) {
+    select.innerHTML = '<option value="">Không tải được danh sách giọng</option>';
+    status.textContent = 'Lỗi: ' + res.error;
+    status.className = 'status-sm err';
+    return;
+  }
+  select.innerHTML = '<option value="">Mặc định của server</option>';
+  res.voices.forEach((voice) => {
+    const option = document.createElement('option');
+    option.value = voice.id;
+    option.textContent = voice.label || voice.id;
+    select.appendChild(option);
+  });
+  select.value = settings.voice || '';
+  status.textContent = `${res.voices.length} giọng sẵn sàng.`;
+  status.className = 'status-sm ok';
+}
+
+async function savePopup() {
+  const button = $('btnSavePopup');
+  button.disabled = true;
+  try {
+    await saveFields({
+      dubVolume: +$('dubVolume').value,
+      bedVolume: +$('bedVolume').value,
+      subtitlesOn: $('subtitlesOn').checked,
+      subtitlesEnOn: $('subtitlesEnOn').checked,
+      subtitlePosition: $('subtitlePosition').value,
+      subtitleSize: $('subtitleSize').value,
+      subtitleColor: $('subtitleColor').value,
+      voice: $('popupVoice').value,
+    });
+    dirty = false;
+    button.textContent = 'Đã lưu thay đổi';
+    $('popupSaveStatus').textContent = 'Đã lưu. Tải lại tab video để áp dụng cỡ chữ hoặc giọng mới.';
+    $('popupSaveStatus').className = 'status-sm ok';
+    setTimeout(() => { button.textContent = 'Lưu thay đổi'; }, 2200);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 $('bedVolume').addEventListener('input', (e) => {
   $('bedVolumeVal').textContent = (+e.target.value).toFixed(2);
   fillSlider(e.target);
-  saveFields({ bedVolume: +e.target.value });
+  markDirty();
 });
 
 $('dubVolume').addEventListener('input', (e) => {
   $('dubVolumeVal').textContent = (+e.target.value).toFixed(2);
   fillSlider(e.target);
-  saveFields({ dubVolume: +e.target.value });
+  markDirty();
 });
-$('subtitlesOn').addEventListener('change', (e) => saveFields({ subtitlesOn: e.target.checked }));
-$('subtitlesEnOn').addEventListener('change', (e) => saveFields({ subtitlesEnOn: e.target.checked }));
-$('subtitlePosition').addEventListener('change', (e) => saveFields({ subtitlePosition: e.target.value }));
-$('subtitleSize').addEventListener('change', (e) => saveFields({ subtitleSize: e.target.value }));
-$('subtitleColor').addEventListener('change', (e) => saveFields({ subtitleColor: e.target.value }));
+$('subtitlesOn').addEventListener('change', markDirty);
+$('subtitlesEnOn').addEventListener('change', markDirty);
+$('subtitlePosition').addEventListener('change', markDirty);
+$('subtitleSize').addEventListener('change', markDirty);
+$('subtitleColor').addEventListener('change', markDirty);
+$('popupVoice').addEventListener('change', markDirty);
 
 $('btnResetSubPos').addEventListener('click', async () => {
   await saveFields({ subtitleOffsetX: 0, subtitleOffsetY: 0 });
   const btn = $('btnResetSubPos');
   const original = btn.textContent;
   btn.textContent = 'Đã đặt lại — tải lại tab video để thấy';
+  $('popupSaveStatus').textContent = 'Đã đặt lại vị trí phụ đề.';
+  $('popupSaveStatus').className = 'status-sm ok';
   setTimeout(() => { btn.textContent = original; }, 2500);
 });
+$('btnSavePopup').addEventListener('click', savePopup);
 
 const SUPPORTED_TAB_URLS = ['https://www.coursera.org/*', 'https://www.youtube.com/*'];
 const SUPPORTED_PAGE_RE = /^https:\/\/(www\.coursera\.org\/learn\/|www\.youtube\.com\/watch)/;

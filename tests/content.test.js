@@ -75,7 +75,7 @@ function makeElement(tag = 'div') {
   return el;
 }
 
-function loadContentScript() {
+function loadContentScript({ supportedSites } = {}) {
   const created = [];
   const video = makeElement('video');
   video.duration = 600;
@@ -143,7 +143,7 @@ function loadContentScript() {
       id: 'test-extension',
       async sendMessage(msg) {
         if (msg.type === 'GET_CONTENT_SETTINGS') {
-          return { ok: true, settings: { serverUrl: 'http://127.0.0.1:18765', voice: '', dubVolume: 1, bedVolume: 1, viSyllablesPerSec: 3.8, planVersion: 'gemini-v2', subtitlesOn: false, subtitlesEnOn: true } };
+          return { ok: true, settings: { serverUrl: 'http://127.0.0.1:18765', voice: '', dubVolume: 1, bedVolume: 1, viSyllablesPerSec: 3.8, planVersion: 'gemini-v2', subtitlesOn: false, subtitlesEnOn: true, supportedSites } };
         }
         if (msg.type === 'FETCH_TTS_VOICES') return { ok: true, voices: [{ id: 'diem_trinh', label: 'Diễm Trinh' }] };
         return { ok: true };
@@ -167,6 +167,16 @@ function loadContentScript() {
   }
   return { context, video, ports, created, body };
 }
+
+test('site bị tắt thì không gắn nút dubbing', async () => {
+  const harness = loadContentScript({ supportedSites: { coursera: false, youtube: true } });
+  tick(harness.context);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(
+    harness.created.some((el) => el.tagName === 'BUTTON' && /ldub-btn/.test(el.className)),
+    false,
+  );
+});
 
 /** Màu chấm trạng thái đang gắn trên nút Dub */
 function statusOf(harness) {

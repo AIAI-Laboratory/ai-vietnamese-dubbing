@@ -7,6 +7,7 @@ const DEFAULTS = {
   serverUrl: "http://127.0.0.1:18765",
   serverApiKey: "",
   voice: "",
+  supportedSites: { coursera: true, youtube: true },
 
   viSyllablesPerSec: 3.8,
   planVersion: "gemini-v2",
@@ -49,29 +50,11 @@ document.querySelectorAll("#themeSwitch button").forEach((b) => {
 });
 applyTheme(currentThemeChoice());
 
-const TAB_META = {
-  "tab-translate": {
-    title: "Dịch",
-    sub: "Gemini API chính thức, chỉ cần một API key.",
-  },
-  "tab-voice": {
-    title: "Giọng đọc",
-    sub: "Server TTS chạy trên máy bạn (hoặc VPS riêng) — cấu hình địa chỉ, API key và giọng.",
-  },
-};
-
 function switchTab(tabId) {
   document
     .querySelectorAll(".nav-item")
     .forEach((b) => b.classList.toggle("active", b.dataset.tab === tabId));
-  document
-    .querySelectorAll(".tab-panel")
-    .forEach((p) => p.classList.toggle("active", p.id === tabId));
-  const meta = TAB_META[tabId];
-  if (meta) {
-    $("contentTitle").textContent = meta.title;
-    $("contentSub").textContent = meta.sub;
-  }
+  document.getElementById(tabId)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 document.querySelectorAll(".nav-item").forEach((b) => {
@@ -90,6 +73,7 @@ let loadedSyllableRate = "";
 async function load() {
   const stored = await chrome.storage.local.get("settings");
   const s = { ...DEFAULTS, ...(stored.settings || {}) };
+  s.supportedSites = { ...DEFAULTS.supportedSites, ...(s.supportedSites || {}) };
   if (s.planVersion !== DEFAULTS.planVersion) {
     s.planVersion = DEFAULTS.planVersion;
     s.viSyllablesPerSec = DEFAULTS.viSyllablesPerSec;
@@ -114,6 +98,9 @@ async function load() {
     $("voice").value = s.voice;
   }
 
+  $("siteCoursera").checked = s.supportedSites.coursera !== false;
+  $("siteYoutube").checked = s.supportedSites.youtube !== false;
+
   $("viSyllablesPerSec").value = s.viSyllablesPerSec;
   loadedSyllableRate = String(s.viSyllablesPerSec);
 
@@ -131,6 +118,10 @@ async function save() {
     serverUrl: $("serverUrl").value.trim() || DEFAULTS.serverUrl,
     serverApiKey: $("serverApiKey").value.trim(),
     voice: $("voice").value,
+    supportedSites: {
+      coursera: $("siteCoursera").checked,
+      youtube: $("siteYoutube").checked,
+    },
 
     planVersion: DEFAULTS.planVersion,
   };

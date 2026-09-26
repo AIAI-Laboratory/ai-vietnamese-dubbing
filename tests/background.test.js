@@ -68,7 +68,7 @@ function loadWorker({ jobStates, audioWindows }) {
 
   let pollCount = 0;
   context.fetch = async (url, options = {}) => {
-    calls.push({ url, method: options.method || 'GET' });
+    calls.push({ url, method: options.method || 'GET', headers: options.headers || {} });
     if (url.includes('generativelanguage')) {
       const body = JSON.parse(options.body);
       const prompt = body.contents[0].parts[0].text;
@@ -83,6 +83,7 @@ function loadWorker({ jobStates, audioWindows }) {
       return geminiReply({ segments: unique.map((id) => ({ id, vi: `câu số ${id}` })) });
     }
     if (url.endsWith('/api/synthesize')) return jsonReply({ jobId: 'a'.repeat(16) });
+    if (url.endsWith('/api/voices')) return jsonReply({ voices: [{ id: 'voice-a', label: 'Giọng A' }] });
     if (url.includes('/api/job/')) {
       const state = jobStates[Math.min(pollCount, jobStates.length - 1)];
       pollCount++;
@@ -264,4 +265,25 @@ test('content script bản cũ bị từ chối NGAY, không tiêu tiền dịch
     0,
     'không được gọi API dịch khi giao thức lệch',
   );
+});
+
+test('Load voices dùng server API key vừa nhập thay vì key cũ trong storage', async () => {
+  const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
+  let response;
+  worker.context.__onMessage(
+    {
+      type: 'FETCH_TTS_VOICES',
+      serverUrl: 'http://127.0.0.1:18765',
+      serverApiKey: 'new-key-from-options',
+      timeoutMs: 1000,
+    },
+    {},
+    (value) => { response = value; },
+  );
+  for (let i = 0; i < 20 && !response; i++) await new Promise((resolve) => setTimeout(resolve, 2));
+
+  assert.strictEqual(response.ok, true);
+  assert.strictEqual(JSON.stringify(response.voices), JSON.stringify([{ id: 'voice-a', label: 'Giọng A' }]));
+  const request = worker.calls.find((call) => call.url.endsWith('/api/voices'));
+  assert.strictEqual(request.headers['X-API-Key'], 'new-key-from-options');
 });

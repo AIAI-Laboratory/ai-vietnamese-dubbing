@@ -23,6 +23,7 @@
     serverUrl: "http://127.0.0.1:18765",
     serverApiKey: "",
     voice: "",
+    supportedSites: { coursera: true, youtube: true },
     viSyllablesPerSec: 3.8,
     planVersion: "kokoro-v11",
   };
@@ -260,6 +261,10 @@
         return;
       }
       console.error("[LDUB] không nạp được cài đặt extension:", error);
+      return;
+    }
+    if (settings.supportedSites && settings.supportedSites[site.id] === false) {
+      video = null;
       return;
     }
     injectOverlay();
