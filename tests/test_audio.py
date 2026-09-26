@@ -1,20 +1,17 @@
-"""Đường ống audio: ghép timeline, đường bao ducking, khe thời gian, voicepack."""
+"""Đường ống audio: ghép timeline, đường bao ducking và khe thời gian."""
 
 import base64
 import math
-import pickle
 import struct
 import tempfile
 import tracemalloc
 import unittest
 import wave
-import zipfile
 from pathlib import Path
 
 import conftest  # noqa: F401
 
 import audio_pipeline as ap
-import kokoro_onnx
 
 
 def write_wav(path: Path, samples: list[int]) -> None:
@@ -152,150 +149,6 @@ class AvailableSlotsTest(unittest.TestCase):
         self.assertAlmostEqual(slots[2], 8.0 - ap.BORROW_GAP_SEC - 4.0)
 
 
-class VoicepackLoaderTest(unittest.TestCase):
-    """Voicepack là file pickle tải từ mạng — đây là bề mặt tấn công."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp.name)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def write_pt(self, path, payload, storage_bytes):
-        with zipfile.ZipFile(path, "w") as archive:
-            archive.writestr("vp/data.pkl", payload)
-            archive.writestr("vp/data/0", storage_bytes)
-
-    def rebuild_payload(self, size, stride, offset=0, numel=1):
-        """Dựng đúng chuỗi opcode mà torch.save sinh ra cho một tensor."""
-
-        def text(value):
-            raw = value.encode()
-            return b"X" + len(raw).to_bytes(4, "little") + raw
-
-        def number(value):
-            return b"J" + int(value).to_bytes(4, "little", signed=True)
-
-        def tuple_of(values):
-            return b"(" + b"".join(number(v) for v in values) + b"t"
-
-        return b"".join([
-            b"\x80\x02",
-            b"ctorch._utils\n_rebuild_tensor_v2\n",
-            b"(",
-            b"(",
-            text("storage"),
-            b"ctorch\nFloatStorage\n",
-            text("0"), text("cpu"), number(numel),
-            b"tQ",
-            number(offset),
-            tuple_of(size),
-            tuple_of(stride),
-            b"\x89",
-            b"}",
-            b"tR.",
-        ])
-
-    def test_reads_a_normal_voicepack(self):
-        import numpy as np
-
-        source = np.arange(3 * 1 * 256, dtype=np.float32)
-        path = self.dir / "ok.pt"
-        self.write_pt(
-            path,
-            self.rebuild_payload((3, 1, 256), (256, 256, 1), numel=source.size),
-            source.tobytes(),
-        )
-        loaded = kokoro_onnx.load_voicepack(path)
-        self.assertEqual(loaded.shape, (3, 1, 256))
-        self.assertTrue(np.array_equal(loaded, source.reshape(3, 1, 256)))
-
-    def test_refuses_shape_that_reaches_past_the_stored_data(self):
-        import numpy as np
-
-        source = np.zeros(1 * 1 * 256, dtype=np.float32)
-        path = self.dir / "evil.pt"
-        self.write_pt(
-            path,
-            self.rebuild_payload((10_000, 1, 256), (256, 256, 1), numel=source.size),
-            source.tobytes(),
-        )
-        with self.assertRaises(ValueError):
-            kokoro_onnx.load_voicepack(path)
-
-    def test_refuses_negative_stride(self):
-        import numpy as np
-
-        source = np.zeros(256, dtype=np.float32)
-        path = self.dir / "neg.pt"
-        self.write_pt(
-            path,
-            self.rebuild_payload((1, 1, 256), (256, 256, -1), numel=source.size),
-            source.tobytes(),
-        )
-        with self.assertRaises(ValueError):
-            kokoro_onnx.load_voicepack(path)
-
-    def test_refuses_a_file_that_is_not_a_voicepack(self):
-        path = self.dir / "empty.pt"
-        with zipfile.ZipFile(path, "w") as archive:
-            archive.writestr("readme.txt", "trống")
-        with self.assertRaises(ValueError):
-            kokoro_onnx.load_voicepack(path)
-
-    def test_refuses_a_pickle_that_calls_something_else(self):
-        path = self.dir / "rce.pt"
-        payload = b"\x80\x02cos\nsystem\nX\x04\x00\x00\x00echo\x85R."
-        self.write_pt(path, payload, b"")
-        with self.assertRaises(pickle.UnpicklingError):
-            kokoro_onnx.load_voicepack(path)
-
-    def test_refuses_wrong_shape(self):
-        import numpy as np
-
-        source = np.zeros(64, dtype=np.float32)
-        path = self.dir / "shape.pt"
-        self.write_pt(
-            path,
-            self.rebuild_payload((64,), (1,), numel=source.size),
-            source.tobytes(),
-        )
-        with self.assertRaises(ValueError):
-            kokoro_onnx.load_voicepack(path)
-
-
-class SentenceChunkingTest(unittest.TestCase):
-    """Cửa sổ phoneme của model là 512; phụ đề tự động không có dấu câu."""
-
-    def test_short_text_is_left_alone(self):
-        self.assertEqual(kokoro_onnx.fit_to_context("Xin chào.", 512), ["Xin chào."])
-
-    def test_long_unpunctuated_text_is_split_to_fit(self):
-        text = "linux la he dieu hanh ma nguon mo rat pho bien " * 40
-        pieces = kokoro_onnx.fit_to_context(text, 512)
-        self.assertGreater(len(pieces), 1)
-        for piece in pieces:
-            self.assertLessEqual(len(kokoro_onnx.phonemize(piece)), 510)
-        self.assertEqual("".join(pieces).replace(" ", ""), text.replace(" ", ""))
-
-    def test_a_single_token_longer_than_the_window_is_still_split(self):
-        pieces = kokoro_onnx.fit_to_context("a" * 900, 512)
-        self.assertGreater(len(pieces), 1)
-        for piece in pieces:
-            self.assertLessEqual(len(kokoro_onnx.phonemize(piece)), 510)
-
-    def test_sentence_splitting_keeps_decimals_together(self):
-        self.assertEqual(kokoro_onnx.split_text("Giá là 3.5 đồng."), ["Giá là 3.5 đồng."])
-
-    def test_empty_text_produces_no_chunks(self):
-        self.assertEqual(kokoro_onnx.split_text("   "), [])
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WindowPlanTest(unittest.TestCase):
     """Cửa sổ để phát dần: ranh giới phải rơi đúng mốc bắt đầu một câu."""
 
@@ -339,7 +192,7 @@ class WindowPlanTest(unittest.TestCase):
 
 
 class NumberReadingTest(unittest.TestCase):
-    """vig2p không đọc chữ số: "1000" ra phoneme "→000". Phải đổi sang chữ."""
+    """Chữ số phải được đổi sang cách đọc tiếng Việt trước khi tổng hợp."""
 
     def spoken(self, text):
         import tts_engine
@@ -389,12 +242,10 @@ class NumberReadingTest(unittest.TestCase):
         self.assertEqual(self.spoken("0912"), "không chín một hai")
 
     def test_no_digit_survives_into_the_phonemiser(self):
-        import kokoro_onnx
-
         samples = ["Bài 12 nói về 3 quy tắc.", "Giảm 50% cho mã SAVE10.",
                    "Có 1.000 dòng code trong Python 3.11.4."]
         for sample in samples:
             with self.subTest(sample=sample):
                 spoken = self.spoken(sample)
                 self.assertFalse(any(ch.isdigit() for ch in spoken), spoken)
-                self.assertGreater(len(kokoro_onnx.phonemize(spoken)), 20)
+                self.assertGreater(len(spoken), 20)

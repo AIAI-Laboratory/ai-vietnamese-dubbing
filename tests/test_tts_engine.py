@@ -48,7 +48,7 @@ class VieneuNanoEngineTest(unittest.TestCase):
         self.assertEqual(runtime.calls[0][1]["speed"], 1.1)
         self.assertFalse(runtime.calls[0][1]["apply_watermark"])
 
-    def test_old_kokoro_voice_falls_back_to_nano_default(self):
+    def test_legacy_voice_id_falls_back_to_nano_default(self):
         runtime = FakeVieneu()
         engine = tts_engine.VieneuNanoEngine(runtime=runtime)
         runtime.calls.clear()

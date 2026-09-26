@@ -19,7 +19,6 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "vieneu" },
-    { name = "vig2p" },
 ]
 
 [package.dev-dependencies]
@@ -36,7 +35,6 @@ requires-dist = [
     { name = "python-dotenv" },
     { name = "uvicorn", extras = ["standard"] },
     { name = "vieneu", specifier = "==3.8.3" },
-    { name = "vig2p", specifier = ">=0.1.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1217,18 +1215,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/65/4b/6f049079df241b3bb1a4345c2a575a1d535fc0302d6ca604753cb0db4bc1/vieneu-3.8.3.tar.gz", hash = "sha256:c54cfe71039ed77e9d7ebf68a41bd3c313d0b95172aa1aae73b07964e2ab6455", size = 2637961, upload-time = "2026-09-23T10:23:05.66Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fc/9c/e7b624412b8a734d6b1cd8ca6209f88a309464b05393c40f2e316ec90885/vieneu-3.8.3-py3-none-any.whl", hash = "sha256:7388d166e65746f5bb075bf8094d324f8131a82393680b712260d6f2f983ef06", size = 2643059, upload-time = "2026-09-23T10:23:03.593Z" },
-]
-
-[[package]]
-name = "vig2p"
-version = "0.1.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "sea-g2p" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/88/33/e10f954c7a005dbb3adbd0f99c1005c6957235173c3bf72d0f3e40a7e59e/vig2p-0.1.2.tar.gz", hash = "sha256:5b89e632994ce7be4a5657b5e3b674fa8eb5284495cf34fa0fdd919ee1efa5d0", size = 7231, upload-time = "2026-06-29T04:51:23.39Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d8/f0/c4cf9481c6b19d57fa88c797c45ca9eb099b1b6fbfa22229b3f701e14bdb/vig2p-0.1.2-py3-none-any.whl", hash = "sha256:12f2a3bb55247aec119d816e7a5506b7c25e1020d6c28c0ab6fb81c679cdc078", size = 5053, upload-time = "2026-06-29T04:51:21.837Z" },
 ]
 
 [[package]]

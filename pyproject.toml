@@ -11,7 +11,6 @@ dependencies = [
     "onnxruntime==1.24.3",
     "huggingface-hub",
     "vieneu==3.8.3",
-    "vig2p>=0.1.0",
 ]
 
 [dependency-groups]
