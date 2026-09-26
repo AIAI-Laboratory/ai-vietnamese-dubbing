@@ -25,7 +25,7 @@
     voice: "",
     supportedSites: { coursera: true, youtube: true },
     viSyllablesPerSec: 3.8,
-    planVersion: "kokoro-v11",
+    planVersion: "vieneu-nano-v1",
   };
 
   const SUBTITLE_SIZE_PCT = { small: 0.032, medium: 0.042, large: 0.056 };

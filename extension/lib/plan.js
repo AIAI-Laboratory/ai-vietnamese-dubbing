@@ -116,7 +116,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
         stretchMin: STRETCH_MIN,
         stretchMax,
         note: rate === DEFAULT_RATE
-          ? 'baseline Kokoro — hiệu chỉnh lại trong Cài đặt sau khi chạy thử'
+          ? 'baseline VieNeu Nano — hiệu chỉnh lại trong Cài đặt sau khi chạy thử'
           : 'đã hiệu chỉnh theo Cài đặt',
       },
       stats: {
