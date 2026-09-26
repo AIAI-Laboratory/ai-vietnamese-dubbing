@@ -4,5 +4,7 @@ python-dotenv
 numpy
 onnxruntime==1.24.3
 huggingface-hub
-# G2P tiếng Việt; chỉ phụ thuộc sea-g2p, không kéo torch/transformers.
+vieneu==3.8.3
+# Legacy pip fallback. Source of truth: ../pyproject.toml + ../uv.lock.
+# Preferred setup: uv sync (from repository root).
 vig2p>=0.1.0

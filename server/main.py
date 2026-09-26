@@ -33,6 +33,10 @@ SERVER_DIR = Path(__file__).resolve().parent
 
 load_dotenv(SERVER_DIR / ".env")
 
+# Giữ model cache trong project theo mặc định; HF_HOME vẫn cho phép override.
+MODEL_CACHE_DIR = SERVER_DIR / "models" / "huggingface"
+os.environ.setdefault("HF_HOME", str(MODEL_CACHE_DIR))
+
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,7 +102,7 @@ ENGINE = None
 ENGINE_ERROR: str | None = None
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
-JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kokoro-job")
+JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vieneu-job")
 
 
 @app.middleware("http")
@@ -171,7 +175,7 @@ def _synth_with_timeout(text: str, out_path: Path, voice: str, speed: float):
         except BaseException as exc:  # noqa: BLE001 - chuyển nguyên vẹn sang luồng gọi
             box["error"] = exc
 
-    worker = threading.Thread(target=run, daemon=True, name="kokoro-synth")
+    worker = threading.Thread(target=run, daemon=True, name="vieneu-synth")
     worker.start()
     worker.join(SYNTH_TIMEOUT_SEC)
     if worker.is_alive():
@@ -448,7 +452,7 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
         done_segments = 0
         published: list[dict] = []
         workers = min(SYNTH_WORKERS, total)
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kokoro-seg") as pool:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vieneu-seg") as pool:
             for window in windows:
                 segments = [segment_by_id[i] for i in window["segmentIds"]]
                 window_wavs = []

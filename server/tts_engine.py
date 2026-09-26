@@ -1,4 +1,4 @@
-"""Kokoro-Vietnamese ONNX engine chạy hoàn toàn trên CPU (xem kokoro_onnx.py)."""
+"""VieNeu-TTS v3 Nano ONNX engine chạy hoàn toàn trên CPU."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ logger = logging.getLogger("tts_engine")
 
 SAMPLE_RATE = 24000
 SPEED_MAX = 1.15
-MODEL_REVISION = "9f210d622209fcc216fe2ac6159fed2ff381cb8a"
+VIENEU_STEPS = max(1, int(os.environ.get("VIENEU_STEPS", "16")))
+VIENEU_CFG = float(os.environ.get("VIENEU_CFG", "3.0"))
 
 _LETTER_NAMES = {
     "A": "ây", "B": "bi", "C": "xi", "D": "đi", "E": "ê", "F": "ép", "G": "giê",
@@ -206,44 +207,64 @@ class SynthResult:
     peak: float = 0.0
 
 
-class KokoroOnnxEngine:
-    """Một ONNX session dùng chung; voicepack đổi dưới lock giữa các job."""
+_LEGACY_KOKORO_VOICES = {
+    "diem_trinh", "hung_thinh", "mai_linh", "mai_loan", "manh_dung", "my_yen",
+    "ngoc_huyen", "phat_tai", "thanh_dat", "thuc_trinh", "tuan_ngoc", "storyvert",
+    "duc_an", "duc_duy",
+}
 
-    name = "Kokoro-Vietnamese ONNX (CPU, local)"
+
+class VieneuNanoEngine:
+    """VieNeu-TTS v3 Nano ONNX engine, chạy hoàn toàn trên CPU."""
+
+    name = "VieNeu-TTS v3 Nano (ONNX, CPU, local)"
     sample_rate = SAMPLE_RATE
 
-    def __init__(self) -> None:
+    def __init__(self, runtime=None) -> None:
         import numpy as np
 
-        import kokoro_onnx
-
         self._np = np
-        self._voices = kokoro_onnx.VOICES
-        self._default_voice = os.environ.get("KOKORO_VOICE", kokoro_onnx.DEFAULT_VOICE).strip()
-        if self._default_voice not in self._voices:
-            available = ", ".join(sorted(self._voices))
-            raise ValueError(
-                f"KOKORO_VOICE={self._default_voice!r} không hợp lệ. Có: {available}"
+        if runtime is None:
+            from vieneu import Vieneu
+
+            threads = int(os.environ.get("ORT_THREADS", "0") or 0)
+            runtime = Vieneu(
+                mode="v3nano",
+                steps=VIENEU_STEPS,
+                cfg=VIENEU_CFG,
+                threads=threads,
             )
+        self._runtime = runtime
+        self._voices = self._load_voices()
+        self._default_voice = os.environ.get("VIENEU_VOICE", "Adam").strip()
+        if self._default_voice not in self._voices:
+            self._default_voice = next(iter(self._voices), "")
+        if not self._default_voice:
+            raise RuntimeError("VieNeu Nano không có preset voice nào")
+        self.sample_rate = int(getattr(runtime, "sample_rate", SAMPLE_RATE))
 
-        self._runtime = kokoro_onnx.KokoroOnnx(
-            revision=MODEL_REVISION, voice=self._default_voice
-        )
-
-        if len(self._runtime.synthesize("Xin chào.", crossfade_ms=0)) == 0:
-            raise RuntimeError("Kokoro warm-up không tạo được audio")
+        if len(self._runtime.infer("Xin chào.", voice=self._default_voice,
+                                  steps=VIENEU_STEPS, cfg=VIENEU_CFG,
+                                  apply_watermark=False)) == 0:
+            raise RuntimeError("VieNeu Nano warm-up không tạo được audio")
         logger.info(
-            "Kokoro sẵn sàng: voice=%s | providers=%s",
+            "VieNeu Nano sẵn sàng: voice=%s | sample_rate=%d",
             self._default_voice,
-            self._runtime.providers,
+            self.sample_rate,
         )
+
+    def _load_voices(self) -> dict[str, str]:
+        return {
+            voice_id: label
+            for label, voice_id in self._runtime.list_preset_voices()
+        }
 
     def list_voices(self) -> list[dict[str, str]]:
         """Trả danh sách voice theo hợp đồng API hiện tại."""
 
         return [
-            {"name": name, "label": info["label"]}
-            for name, info in sorted(self._voices.items())
+            {"name": name, "label": label}
+            for name, label in sorted(self._voices.items())
         ]
 
     def _resolve_voice(self, voice: str) -> str:
@@ -252,8 +273,10 @@ class KokoroOnnxEngine:
             if voice and voice.strip() != "vi"
             else self._default_voice
         )
+        if name in _LEGACY_KOKORO_VOICES:
+            return self._default_voice
         if name not in self._voices:
-            raise ValueError(f"Không có voice Kokoro {name!r}")
+            raise ValueError(f"Không có voice VieNeu Nano {name!r}")
         return name
 
     def synth(
@@ -267,11 +290,18 @@ class KokoroOnnxEngine:
 
         voice_name = self._resolve_voice(voice)
         speed = min(max(float(speed), 1.0), SPEED_MAX)
-        audio = self._runtime.synthesize(spoken_text, voice=voice_name, speed=speed)
+        audio = self._runtime.infer(
+            spoken_text,
+            voice=voice_name,
+            speed=speed,
+            steps=VIENEU_STEPS,
+            cfg=VIENEU_CFG,
+            apply_watermark=False,
+        )
 
         audio = self._np.asarray(audio, dtype=self._np.float32).reshape(-1)
         if len(audio) == 0 or not self._np.isfinite(audio).all():
-            raise RuntimeError("Kokoro trả về audio rỗng hoặc không hợp lệ")
+            raise RuntimeError("VieNeu Nano trả về audio rỗng hoặc không hợp lệ")
 
         peak = float(self._np.max(self._np.abs(audio)))
         if peak > 0.99:
@@ -285,7 +315,7 @@ class KokoroOnnxEngine:
         return SynthResult(out_path, len(audio) / self.sample_rate, speed, round(peak, 3))
 
 
-def load_engine() -> KokoroOnnxEngine:
-    """Nạp model ONNX và warm-up trước khi server báo sẵn sàng."""
+def load_engine() -> VieneuNanoEngine:
+    """Nạp VieNeu Nano và warm-up trước khi server báo sẵn sàng."""
 
-    return KokoroOnnxEngine()
+    return VieneuNanoEngine()
