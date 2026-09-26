@@ -8,7 +8,7 @@
 [![Giấy phép](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)](extension/manifest.json)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![Kiểm thử](https://img.shields.io/badge/tests-50%20JS%20%2B%2073%20Python-success)](#kiểm-thử)
+[![Kiểm thử](https://img.shields.io/badge/tests-50%20JS%20%2B%2049%20Python-success)](#kiểm-thử)
 
 [English](README.md) · [Tài liệu server](server/README.md) · [Chạy trên máy khác](deploy/README.md)
 
@@ -79,9 +79,8 @@ flowchart TB
 
     subgraph local["Máy bạn · FastAPI, bắt buộc API key"]
         F["main.py<br/>route · hàng đợi job"]
-        G["tts_engine.py<br/>chuẩn hoá chữ"]
-        H["phonemes.py<br/>G2P hai ngôn ngữ"]
-        I["VieNeu-TTS v3 Nano<br/>ONNX, 3 worker"]
+        G["tts_engine.py<br/>chuẩn hoá chữ + VieNeu wrapper"]
+        H["VieNeu-TTS v3 Nano<br/>ONNX, 3 worker"]
         J["audio_pipeline.py<br/>nén vừa khe · cửa sổ · ducking"]
     end
 
@@ -93,7 +92,7 @@ flowchart TB
     D --> E
     D -->|HTTPS| K
     D -->|"X-API-Key"| F
-    F --> G --> H --> I --> J
+    F --> G --> H --> J
     J -->|"cửa sổ sẵn sàng"| F
 
     classDef browser fill:#dbeafe,stroke:#1d4ed8,color:#0b1220
@@ -186,37 +185,12 @@ Vòng kiểm tra chạy mỗi 250 ms, và chạy thêm khi có `seeking`, `ratec
 
 ## Chất lượng giọng đọc
 
-Chữ đi qua ba bước trước khi tới model, vì áp thẳng G2P tiếng Việt lên câu lẫn tiếng Anh thì đọc sai cả hai phía.
+Chữ được chuẩn hoá trước khi tới VieNeu: acronym và chữ số được đổi thành
+cách đọc tiếng Việt, còn VieNeu tự xử lý phần phonemization cuối cùng.
 
-```mermaid
-flowchart TD
-    A["Bản dịch tiếng Việt<br/>còn lẫn thuật ngữ tiếng Anh"] --> B["normalize_for_speech<br/>acronym và từ đọc riêng"]
-    B --> C["normalize_numbers<br/>1.234.567 · 3.11.4 · SAVE10"]
-    C --> D{"sea_g2p vừa tra<br/>từ điển nào?"}
-    D -->|tiếng Việt| E["luật vig2p<br/>thanh điệu, phụ âm quặt lưỡi"]
-    D -->|tiếng Anh| F["ánh xạ về âm tiếng Việt<br/>server đọc sơ-vơ"]
-    E --> G["VieNeu Nano ONNX"]
-    F --> G
-
-    classDef prep fill:#dbeafe,stroke:#1d4ed8,color:#0b1220
-    classDef choice fill:#fef3c7,stroke:#b45309,color:#0b1220
-    classDef out fill:#dcfce7,stroke:#15803d,color:#0b1220
-    class A,B,C prep
-    class D,E,F choice
-    class G out
-```
-
-**Chữ số.** `vig2p` không có cách đọc cho chữ số — `1000` ra chuỗi phoneme `→000`. Giờ mọi chữ số được đổi thành lời trước khi vào G2P: số có dấu phân nhóm (`1.234.567`), số phiên bản (`3.11.4`), số thập phân, và dạng chữ dính số như `SAVE10`.
-
-**Từ tiếng Anh.** `sea_g2p` tra từng từ một và vốn đã trả về IPA tiếng Anh cho `server`, IPA tiếng Việt cho `chúng`. Hỏng nằm ở bước sau: `vig2p.fix_phonemes` áp luật tiếng Việt lên mọi từ, mà nó coi `ɜ` là dấu thanh — đúng thứ sea_g2p dùng để đánh dấu thanh sắc. Trong tiếng Anh, `ɜː` lại là một nguyên âm thật:
-
-| Từ       | Trước                                  | Sau              |
-| -------- | -------------------------------------- | ---------------- |
-| server   | `ʂˈ↗ːvɚ` — nguyên âm biến thành thanh  | `sˈəvə`, "sơ-vơ" |
-| learning | `lˈ↗ːnɪŋ` — mất sạch nguyên âm         | `lˈəniŋ`         |
-| save     | `ʂˈeɪv` — *s* quặt lưỡi kiểu tiếng Việt| `sˈeiv`          |
-
-Vế thứ hai là bản thân giọng đọc. Đối chiếu 585 từ tiếng Việt có dấu lấy từ chính repo này, sea_g2p không hề sinh ra `ʊ ʌ ð ɚ ɾ ᵻ ʒ ɑ ɡ`, cũng không có `iː uː oʊ aɪ aʊ dʒ`. Model có ô từ vựng cho chúng nhưng chưa từng nghe trong lúc học, nên phát ra thứ không đoán trước được. Vì vậy phoneme tiếng Anh được viết lại bằng bộ âm mà giọng này biết — `machine` đọc "ma-sin", `the` đọc "đờ". Từ mơ hồ giữa hai thứ tiếng (`set`, `map`) vẫn đi đường tiếng Việt, vì hai bên đọc như nhau.
+**Số và acronym.** `normalize_for_speech` đọc thành lời số nguyên, version,
+phần trăm và acronym kỹ thuật trước khi tổng hợp. Phụ đề hiển thị vẫn giữ
+nguyên tiếng Anh gốc.
 
 ---
 
@@ -240,13 +214,11 @@ extension/                  Chrome MV3, không cần build
 server/                     TTS server FastAPI, chỉ API
 ├── main.py                 Route, hàng đợi job, vòng đời, giới hạn
 ├── auth.py                 X-API-Key cho mọi route
-├── tts_engine.py           Chuẩn hoá chữ, đọc số, xuất WAV
-├── phonemes.py             G2P cho câu lẫn hai thứ tiếng
-├── kokoro_onnx.py          Bản Kokoro cũ, giữ lại cho test
+├── tts_engine.py           Chuẩn hoá chữ, VieNeu Nano wrapper, xuất WAV
 ├── audio_pipeline.py       Nén vừa khe, cắt cửa sổ, đường bao ducking
 └── .env.example            Mọi thiết lập, có giải thích
 
-tests/                      50 test JavaScript + 73 test Python
+tests/                      50 test JavaScript + 49 test Python
 deploy/                     Chạy server trên máy khác
 ```
 
@@ -263,6 +235,8 @@ deploy/                     Chạy server trên máy khác
   - macOS: `brew install ffmpeg`
 - Một **Gemini API key** ([aistudio.google.com](https://aistudio.google.com/apikey))
 - Khoảng 280 MB cho model VieNeu Nano, tải một lần vào `server/models/`
+
+Xem cách lưu và deploy model trong [MODEL_DEPLOY.md](MODEL_DEPLOY.md).
 
 ---
 
@@ -482,7 +456,6 @@ Phần phát giữ một thẻ `<audio>` cho mỗi cửa sổ. Cửa sổ có th
 - **Mọi route đều cần API key.** `X-API-Key` được so bằng `secrets.compare_digest` trên bytes, và server không khởi động nếu key trống.
 - **Swagger mặc định tắt.** `/docs`, `/redoc`, `/openapi.json` là route Starlette thuần, dependency không phủ được, nên `ENABLE_DOCS` gác chúng.
 - **Body bị chặn theo số byte thật**, không tin `Content-Length` — client tự khai được, còn body chunked thì không có header đó.
-- **Voicepack là pickle không tin được.** Lúc nạp chỉ cho phép dựng lại tensor, và mọi view `as_strided` đều bị kiểm tra nằm gọn trong storage.
 - **Đĩa được kiểm trước khi làm** — job không đủ chỗ bị từ chối bằng 507 thay vì làm đầy ổ.
 - **Job huỷ được và tự hết hạn.** Đóng tab là job bị huỷ, audio đã xong bị xoá sau `JOB_RETENTION_MIN`, thư mục còn sót được dọn lúc khởi động.
 - **Không có gì ngoài chữ của phụ đề rời khỏi máy**, và chỉ đi tới Gemini.
@@ -496,7 +469,7 @@ node --test tests/*.test.js
 uv run python -m unittest discover -s tests -t tests
 ```
 
-50 test JavaScript và 73 test Python. Nhóm JavaScript chạy chính `background.js` và `content.js` thật trong `vm` với `chrome`, `fetch` và DOM giả lập, nên kiểm đúng code sẽ chạy chứ không phải bản sao. Nhóm Python phủ API, pipeline audio, wrapper TTS và phần G2P hai ngôn ngữ.
+50 test JavaScript và 49 test Python. Nhóm JavaScript chạy chính `background.js` và `content.js` thật trong `vm` với `chrome`, `fetch` và DOM giả lập, nên kiểm đúng code sẽ chạy chứ không phải bản sao. Nhóm Python phủ API, pipeline audio, chuẩn hoá chữ và wrapper TTS.
 
 ---
 

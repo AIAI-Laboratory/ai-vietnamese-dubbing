@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)](extension/manifest.json)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-50%20JS%20%2B%2073%20Python-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-50%20JS%20%2B%2049%20Python-success)](#testing)
 
 [Tiếng Việt](README.vi.md) · [Server reference](server/README.md) · [Remote deployment](deploy/README.md)
 
@@ -79,9 +79,8 @@ flowchart TB
 
     subgraph local["Your machine · FastAPI, API key required"]
         F["main.py<br/>routes · job queue"]
-        G["tts_engine.py<br/>text normalisation"]
-        H["phonemes.py<br/>bilingual G2P"]
-        I["VieNeu-TTS v3 Nano<br/>ONNX inference, 3 workers"]
+        G["tts_engine.py<br/>text normalisation + VieNeu wrapper"]
+        H["VieNeu-TTS v3 Nano<br/>ONNX inference, 3 workers"]
         J["audio_pipeline.py<br/>slot fitting · windows · ducking"]
     end
 
@@ -93,7 +92,7 @@ flowchart TB
     D --> E
     D -->|HTTPS| K
     D -->|"X-API-Key"| F
-    F --> G --> H --> I --> J
+    F --> G --> H --> J
     J -->|"window ready"| F
 
     classDef browser fill:#dbeafe,stroke:#1d4ed8,color:#0b1220
@@ -186,37 +185,13 @@ The check runs every 250 ms and on `seeking`, `ratechange` and `play`. A seek is
 
 ## Speech quality
 
-Text takes three passes before the model sees it, because a Vietnamese G2P applied naively to mixed text mispronounces both halves.
+Text is normalized before VieNeu sees it: technical acronyms and numbers are
+expanded into Vietnamese spoken forms, while VieNeu owns the final Vietnamese
+and mixed-text phonemization.
 
-```mermaid
-flowchart TD
-    A["Vietnamese translation<br/>with English terms"] --> B["normalize_for_speech<br/>acronyms and spoken forms"]
-    B --> C["normalize_numbers<br/>1.234.567 · 3.11.4 · SAVE10"]
-    C --> D{"which dictionary<br/>did sea_g2p use?"}
-    D -->|Vietnamese| E["vig2p rules<br/>tones, retroflex onsets"]
-    D -->|English| F["map onto Vietnamese sounds<br/>server reads sơ-vơ"]
-    E --> G["VieNeu Nano ONNX"]
-    F --> G
-
-    classDef prep fill:#dbeafe,stroke:#1d4ed8,color:#0b1220
-    classDef choice fill:#fef3c7,stroke:#b45309,color:#0b1220
-    classDef out fill:#dcfce7,stroke:#15803d,color:#0b1220
-    class A,B,C prep
-    class D,E,F choice
-    class G out
-```
-
-**Numbers.** `vig2p` has no reading for digits — `1000` came out as the phoneme string `→000`. Digits are now spelled out before G2P: grouped thousands (`1.234.567`), version numbers (`3.11.4`), decimals, and letter-digit forms such as `SAVE10`.
-
-**English words.** `sea_g2p` looks each word up separately and already returns English IPA for `server` and Vietnamese for `chúng`. The damage was downstream: `vig2p.fix_phonemes` applies Vietnamese rules to every word, and it treats `ɜ` as a tone mark — which is what sea_g2p uses for a rising tone. In English, `ɜː` is a real vowel:
-
-| Word     | Before                              | After             |
-| -------- | ----------------------------------- | ----------------- |
-| server   | `ʂˈ↗ːvɚ` — vowel replaced by a tone | `sˈəvə`, "sơ-vơ"  |
-| learning | `lˈ↗ːnɪŋ` — no vowel left at all    | `lˈəniŋ`          |
-| save     | `ʂˈeɪv` — retroflex Vietnamese *s*  | `sˈeiv`           |
-
-The second half is the voice itself. Across the 585 accented Vietnamese words in this repository, sea_g2p never emits `ʊ ʌ ð ɚ ɾ ᵻ ʒ ɑ ɡ`, nor `iː uː oʊ aɪ aʊ dʒ`. The model has vocabulary entries for them but never heard them while learning, so it renders them unpredictably. English phonemes are therefore rewritten into sounds the voice knows — `machine` reads "ma-sin", `the` reads "đờ". A word ambiguous between the two languages (`set`, `map`) stays on the Vietnamese path, where both readings agree anyway.
+**Numbers and acronyms.** `normalize_for_speech` spells numbers, versions,
+percentages and technical acronyms before synthesis. Subtitle text stays
+untouched, so the visible English subtitle remains faithful to the source.
 
 ---
 
@@ -240,13 +215,11 @@ extension/                  Chrome MV3 extension, no build step
 server/                     FastAPI TTS server, API only
 ├── main.py                 Routes, job queue, lifecycle, limits
 ├── auth.py                 X-API-Key on every route
-├── tts_engine.py           Text normalisation, number reading, WAV output
-├── phonemes.py             Bilingual grapheme-to-phoneme conversion
-├── kokoro_onnx.py          Legacy Kokoro implementation kept for tests
+├── tts_engine.py           Text normalisation, VieNeu Nano wrapper, WAV output
 ├── audio_pipeline.py       Slot fitting, windowing, ducking envelope
 └── .env.example            Every setting, documented
 
-tests/                      50 JavaScript + 73 Python tests
+tests/                      50 JavaScript + 49 Python tests
 deploy/                     Running the server on another machine
 ```
 
@@ -263,6 +236,8 @@ deploy/                     Running the server on another machine
   - macOS: `brew install ffmpeg`
 - A **Gemini API key** ([aistudio.google.com](https://aistudio.google.com/apikey))
 - ~280 MB for the VieNeu Nano model, downloaded once into `server/models/`
+
+Model storage and deployment details: [MODEL_DEPLOY.md](MODEL_DEPLOY.md).
 
 ---
 
@@ -482,7 +457,6 @@ Measured on a Ryzen 5 5600H (6 cores), CPU only, a 10-minute lecture of 50 sente
 - **Every route needs the API key.** `X-API-Key` is compared with `secrets.compare_digest` on bytes, and the server will not start with an empty key.
 - **Swagger is off by default.** `/docs`, `/redoc` and `/openapi.json` are plain Starlette routes that the dependency cannot cover, so `ENABLE_DOCS` gates them.
 - **Bodies are limited by real byte count**, not by `Content-Length`, which a client controls and chunked uploads omit.
-- **The voicepack is untrusted pickle.** Loading allows tensor reconstruction only, and every `as_strided` view is bounds-checked against its storage.
 - **Disk is checked before work starts** — a job that cannot fit is refused with 507 rather than filling the volume.
 - **Jobs are cancellable and expire.** Closing the tab cancels the job, finished audio is deleted after `JOB_RETENTION_MIN`, and stale directories are swept at startup.
 - **Nothing but caption text leaves the machine**, and only to Gemini.
@@ -496,7 +470,7 @@ node --test tests/*.test.js
 uv run python -m unittest discover -s tests -t tests
 ```
 
-50 JavaScript tests and 73 Python tests. The JavaScript ones run the real `background.js` and `content.js` inside a `vm` with `chrome`, `fetch` and the DOM mocked, so they exercise shipped code rather than a copy of it. The Python ones cover the API surface, the audio pipeline, the TTS wrapper and the bilingual G2P.
+50 JavaScript tests and 49 Python tests. The JavaScript ones run the real `background.js` and `content.js` inside a `vm` with `chrome`, `fetch` and the DOM mocked, so they exercise shipped code rather than a copy of it. The Python ones cover the API surface, audio pipeline, normalization and the TTS wrapper.
 
 ---
 

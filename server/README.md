@@ -13,14 +13,18 @@ security model — see the [main README](../README.md).
 | `main.py`           | Routes, job queue, job lifecycle, request limits             |
 | `auth.py`           | `X-API-Key` dependency applied to every route                |
 | `tts_engine.py`     | Text normalisation, VieNeu Nano synthesis, WAV output        |
-| `phonemes.py`       | Grapheme to phoneme for Vietnamese text with English terms   |
-| `kokoro_onnx.py`    | Legacy Kokoro ONNX implementation kept for tests             |
 | `audio_pipeline.py` | Slot fitting, window assembly, ducking envelope, encoding    |
 
 The active engine is `vieneu.Vieneu(mode="v3nano")`: a 48M-parameter,
-24 kHz Vietnamese model that runs torch-free on ONNX Runtime. Its Hugging Face
-cache is stored under `server/models/huggingface/` by default; set `HF_HOME` to
-override that location.
+24 kHz Vietnamese model that runs torch-free on ONNX Runtime. Model files are
+stored under `server/models/vieneu-nano/`; prefetch and validate them with:
+
+```bash
+uv run python scripts/download_vieneu_model.py
+```
+
+See [MODEL_DEPLOY.md](../MODEL_DEPLOY.md) for prefetch, verification and
+deployment storage rules.
 
 ## Install
 
@@ -79,13 +83,12 @@ lifetime. One job runs at a time; within a job, `SYNTH_WORKERS` sentences are
 synthesised in parallel (3 by default).
 
 `VIENEU_VOICE` picks the default voice, and `GET /api/voices` lists all voice
-ids. Extension settings still holding old Kokoro voice ids or gTTS voice id
-`vi` fall back to the configured VieNeu default.
+ids. The old `vi` setting falls back to the configured VieNeu default.
 
 Before synthesis, text goes through `normalize_for_speech`: technical acronyms
-such as API, HTTPS, JSON, CPU and GPU become Vietnamese spoken forms, digits
-are spelled out, and English words are phonemised as English and then mapped
-onto Vietnamese sounds. Subtitle text is left untouched.
+such as API, HTTPS, JSON, CPU and GPU become Vietnamese spoken forms and digits
+are spelled out. VieNeu owns the final phonemization; subtitle text is left
+untouched.
 
 ## API
 
