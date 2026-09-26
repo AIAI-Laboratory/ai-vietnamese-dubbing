@@ -50,17 +50,6 @@ document.querySelectorAll("#themeSwitch button").forEach((b) => {
 });
 applyTheme(currentThemeChoice());
 
-function switchTab(tabId) {
-  document
-    .querySelectorAll(".nav-item")
-    .forEach((b) => b.classList.toggle("active", b.dataset.tab === tabId));
-  document.getElementById(tabId)?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-document.querySelectorAll(".nav-item").forEach((b) => {
-  b.addEventListener("click", () => switchTab(b.dataset.tab));
-});
-
 function currentGeminiConfig() {
   return {
     geminiApiKey: $("geminiApiKey").value.trim(),
