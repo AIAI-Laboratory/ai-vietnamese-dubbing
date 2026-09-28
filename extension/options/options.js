@@ -10,7 +10,7 @@ const DEFAULTS = {
   supportedSites: { coursera: true, youtube: true },
 
   viSyllablesPerSec: 3.8,
-  planVersion: "gemini-v2",
+  planVersion: DUB.config.planVersion,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -57,6 +57,15 @@ function currentGeminiConfig() {
   };
 }
 
+function isAllowedServerUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || (url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname));
+  } catch (error) {
+    return false;
+  }
+}
+
 let loadedSyllableRate = "";
 
 async function load() {
@@ -98,13 +107,18 @@ async function load() {
 
 /** Đọc bản settings hiện có rồi chỉ ghi đè các trường trang này quản — không tự bịa nguyên object mới, sẽ xoá mất phần popup.js đang giữ (âm lượng, phụ đề, cache...). */
 async function save() {
+  const serverUrl = $("serverUrl").value.trim() || DEFAULTS.serverUrl;
+  if (!isAllowedServerUrl(serverUrl)) {
+    setStatus($("serverStatus"), "Server từ xa phải dùng HTTPS; HTTP chỉ được phép với localhost.", false);
+    return;
+  }
   const stored = await chrome.storage.local.get("settings");
   const settings = {
     ...(stored.settings || {}),
     geminiApiKey: $("geminiApiKey").value.trim(),
     timeoutMs: DEFAULTS.timeoutMs,
 
-    serverUrl: $("serverUrl").value.trim() || DEFAULTS.serverUrl,
+    serverUrl,
     serverApiKey: $("serverApiKey").value.trim(),
     voice: $("voice").value,
     supportedSites: {
@@ -170,12 +184,16 @@ async function onCheckServer() {
   const status = $("serverStatus");
   const serverUrl = $("serverUrl").value.trim() || DEFAULTS.serverUrl;
   const serverApiKey = $("serverApiKey").value.trim();
+  if (!isAllowedServerUrl(serverUrl)) {
+    setStatus(status, "Server từ xa phải dùng HTTPS; HTTP chỉ được phép với localhost.", false);
+    return;
+  }
   setStatus(status, "Đang kiểm tra...", true);
   const res = await chrome.runtime.sendMessage({
     type: "CHECK_TTS_SERVER",
     serverUrl,
     serverApiKey,
-  });
+  }).catch((error) => ({ ok: false, error: error.message || String(error) }));
   if (!res.ok) {
     const is401 = /HTTP 401/.test(res.error || "");
     setStatus(
@@ -219,7 +237,7 @@ async function onLoadVoices() {
     serverUrl,
     serverApiKey,
     timeoutMs: 15000,
-  });
+  }).catch((error) => ({ ok: false, error: error.message || String(error) }));
   if (!res.ok) {
     setStatus(status, "Lỗi tải giọng: " + res.error, false);
     return;
@@ -279,7 +297,7 @@ async function onPreviewVoice() {
     voice,
     timeoutMs: 30000,
     text: "Xin chào, đây là giọng đọc thử cho video bài giảng tiếng Việt.",
-  });
+  }).catch((error) => ({ ok: false, error: error.message || String(error) }));
   if (!res.ok) {
     setStatus(status, "Lỗi: " + res.error, false);
     return;

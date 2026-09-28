@@ -1,0 +1,25 @@
+.sd-logo {
+  display: block;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+}
+
+.sd-signal-bars {
+  display: inline-flex;
+  align-items: end;
+  gap: 3px;
+  height: 20px;
+}
+
+.sd-signal-bars i {
+  display: block;
+  width: 3px;
+  border-radius: 99px;
+  background: var(--sd-secondary);
+}
+
+.sd-signal-bars i:nth-child(1) { height: 7px; opacity: .45; }
+.sd-signal-bars i:nth-child(2) { height: 13px; opacity: .65; }
+.sd-signal-bars i:nth-child(3) { height: 19px; }
+.sd-signal-bars i:nth-child(4) { height: 10px; opacity: .55; }

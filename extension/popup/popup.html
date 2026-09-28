@@ -6,20 +6,18 @@
 <!-- External, không inline — CSP mặc định của MV3 (script-src 'self') chặn
      mọi <script> viết thẳng trong HTML, dù cùng gói extension. -->
 <script src="../lib/theme.js"></script>
+<link rel="stylesheet" href="../ui/tokens.css">
+<link rel="stylesheet" href="../ui/components.css">
 <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <div class="header">
-    <span class="header-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/>
-      </svg>
-    </span>
+    <img class="sd-logo header-logo" src="../icons/synthdub-logo.svg" alt="">
     <span class="header-copy">
       <strong>Local Dub</strong>
       <small>English → Vietnamese</small>
     </span>
-    <span class="header-signal" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <span class="sd-signal-bars header-signal" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
   </div>
 
   <div id="status" class="status">Đang kiểm tra...</div>

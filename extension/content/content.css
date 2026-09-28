@@ -1,11 +1,11 @@
 :root {
-  --ldub-accent: #ff7654;
-  --ldub-accent-dark: #e45b3b;
-  --ldub-signal: #63d2c4;
-  --ldub-ink: #e9f1ed;
-  --ldub-bg: rgba(11, 23, 32, .94);
-  --ldub-surface: rgba(18, 36, 44, .92);
-  --ldub-border: rgba(159, 206, 199, .24);
+  --ldub-accent: var(--sd-primary);
+  --ldub-accent-dark: var(--sd-primary-strong);
+  --ldub-signal: var(--sd-secondary);
+  --ldub-ink: var(--sd-text);
+  --ldub-bg: color-mix(in srgb, var(--sd-bg) 94%, transparent);
+  --ldub-surface: color-mix(in srgb, var(--sd-surface) 92%, transparent);
+  --ldub-border: color-mix(in srgb, var(--sd-secondary) 24%, transparent);
 }
 
 .ldub-overlay {

@@ -181,6 +181,15 @@ class WindowPlanTest(unittest.TestCase):
         self.assertEqual(windows[0]["startSec"], 0.0)
         self.assertEqual(windows[0]["endSec"], 60.0)
 
+    def test_default_window_target_reads_runtime_setting(self):
+        previous = ap.WINDOW_TARGET_SEC
+        ap.WINDOW_TARGET_SEC = 10.0
+        try:
+            windows = ap.plan_windows(self.segments(6, step=8.0), 52.0)
+        finally:
+            ap.WINDOW_TARGET_SEC = previous
+        self.assertEqual(len(windows), 3)
+
     def test_no_segments_gives_no_windows(self):
         self.assertEqual(ap.plan_windows([], 60.0), [])
 

@@ -39,7 +39,7 @@ function audioReply(bytes = 32) {
 }
 
 /** Dựng môi trường service worker giả và nạp background.js vào đó. */
-function loadWorker({ jobStates, audioWindows }) {
+function loadWorker({ jobStates, audioWindows, geminiDelayMs = 0 }) {
   const calls = [];
   const context = {
     console,
@@ -61,6 +61,7 @@ function loadWorker({ jobStates, audioWindows }) {
     Set,
     Map,
     RegExp,
+    URL,
     isNaN,
     parseInt,
   };
@@ -70,6 +71,7 @@ function loadWorker({ jobStates, audioWindows }) {
   context.fetch = async (url, options = {}) => {
     calls.push({ url, method: options.method || 'GET', headers: options.headers || {} });
     if (url.includes('generativelanguage')) {
+      if (geminiDelayMs) await new Promise((resolve) => setTimeout(resolve, geminiDelayMs));
       const body = JSON.parse(options.body);
       const prompt = body.contents[0].parts[0].text;
       const ids = [...prompt.matchAll(/^(\d+)\t/gm)].map((m) => Number(m[1]));
@@ -191,7 +193,7 @@ test('mỗi cửa sổ server công bố đều tới content script ngay, khôn
   assert.ok(firstWindowAt < doneAt, 'cửa sổ đầu phải tới trước DONE');
 });
 
-test('DONE mang đủ mọi cửa sổ để dựng lại và lưu cache', async () => {
+test('DONE chỉ mang metadata cửa sổ, tránh gửi lại audio base64', async () => {
   const worker = loadWorker({
     jobStates: [
       { status: 'running', progress: 0.5, windows: [WINDOWS[0]] },
@@ -203,9 +205,18 @@ test('DONE mang đủ mọi cửa sổ để dựng lại và lưu cache', async
   const done = received.find((m) => m.type === 'DONE');
   assert.ok(done, 'phải có DONE');
   assert.strictEqual(done.windows.length, 2);
-  assert.ok(done.windows.every((w) => w.base64), 'mỗi cửa sổ trong DONE phải có audio');
+  assert.ok(done.windows.every((w) => !w.base64), 'DONE không được nhân đôi audio base64');
   assert.deepStrictEqual(done.overflowSegmentIds, [2]);
   assert.ok(Array.isArray(done.subtitles) && done.subtitles.length, 'DONE phải mang phụ đề');
+});
+
+test('mọi lớp dùng chung một planVersion', async () => {
+  const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
+  let response;
+  worker.context.__onMessage({ type: 'GET_CONTENT_SETTINGS' }, {}, (value) => { response = value; });
+  for (let i = 0; i < 20 && !response; i++) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.strictEqual(response.ok, true);
+  assert.strictEqual(response.settings.planVersion, 'vieneu-nano-v1');
 });
 
 test('job lỗi phía server báo ERROR chứ không im lặng', async () => {
@@ -242,6 +253,27 @@ test('đóng tab khi job đang chạy sẽ yêu cầu server huỷ', async () =>
   await new Promise((r) => setTimeout(r, 10));
   const deletes = worker.calls.filter((c) => c.method === 'DELETE');
   assert.strictEqual(deletes.length, 0, 'job đã xong thì không gửi DELETE');
+});
+
+test('đóng tab trước khi tạo TTS thì không gửi tiếp job server', async () => {
+  const worker = loadWorker({
+    jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }],
+    geminiDelayMs: 40,
+  });
+  const received = [];
+  let disconnect = () => {};
+  const port = {
+    name: 'dub-job',
+    postMessage: (msg) => received.push(msg),
+    onMessage: { addListener: (fn) => { port.__deliver = fn; } },
+    onDisconnect: { addListener: (fn) => { disconnect = fn; } },
+  };
+  worker.context.__onConnect(port);
+  port.__deliver({ type: 'START', protocol: 2, videoId: 'vid-1', durationSec: 20, cues: CUES });
+  await new Promise((r) => setTimeout(r, 5));
+  disconnect();
+  await new Promise((r) => setTimeout(r, 120));
+  assert.strictEqual(worker.calls.some((call) => call.url.endsWith('/api/synthesize')), false);
 });
 
 test('content script bản cũ bị từ chối NGAY, không tiêu tiền dịch', async () => {
@@ -286,4 +318,18 @@ test('Load voices dùng server API key vừa nhập thay vì key cũ trong stora
   assert.strictEqual(JSON.stringify(response.voices), JSON.stringify([{ id: 'voice-a', label: 'Giọng A' }]));
   const request = worker.calls.find((call) => call.url.endsWith('/api/voices'));
   assert.strictEqual(request.headers['X-API-Key'], 'new-key-from-options');
+});
+
+test('không gọi TTS qua HTTP tới máy từ xa', async () => {
+  const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
+  let response;
+  worker.context.__onMessage({
+    type: 'CHECK_TTS_SERVER',
+    serverUrl: 'http://10.0.0.8:18765',
+    serverApiKey: 'key',
+  }, {}, (value) => { response = value; });
+  for (let i = 0; i < 20 && !response; i++) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.strictEqual(response.ok, false);
+  assert.match(response.error, /HTTPS/);
+  assert.strictEqual(worker.calls.length, 0);
 });

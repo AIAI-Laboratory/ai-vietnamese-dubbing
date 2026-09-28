@@ -9,6 +9,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import statistics
 import sys
@@ -46,11 +47,15 @@ from starlette.background import BackgroundTask
 
 import audio_pipeline
 import tts_engine
-from auth import require_api_key
+from auth import API_KEY, require_api_key
 
 WORK_DIR = Path(tempfile.gettempdir()) / "local-ai-vi-dub"
-WORK_DIR.mkdir(exist_ok=True)
+os.umask(0o077)
+WORK_DIR.mkdir(mode=0o700, exist_ok=True)
+WORK_DIR.chmod(0o700)
 LOG_PATH = WORK_DIR / "server.log"
+LOG_PATH.touch(mode=0o600, exist_ok=True)
+LOG_PATH.chmod(0o600)
 JOB_RETENTION_MIN = max(5, int(os.environ.get("JOB_RETENTION_MIN", "60")))
 MAX_PENDING_JOBS = max(1, int(os.environ.get("MAX_PENDING_JOBS", "4")))
 MAX_BODY_BYTES = max(1, int(os.environ.get("MAX_BODY_MB", "16"))) * 1024 * 1024
@@ -91,18 +96,32 @@ app = FastAPI(
     redoc_url="/redoc" if ENABLE_DOCS else None,
     openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+CORS_ORIGINS = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip()]
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "X-API-Key"],
+    )
 
 ENGINE = None
 ENGINE_ERROR: str | None = None
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vieneu-job")
+PREVIEW_LOCK = threading.BoundedSemaphore(1)
+
+
+@app.middleware("http")
+async def protect_docs(request, call_next):
+    """Docs là route Starlette, nên tự áp dụng cùng API key khi bật."""
+
+    if ENABLE_DOCS and request.url.path in ("/docs", "/redoc", "/openapi.json"):
+        key = request.headers.get("X-API-Key", "")
+        if not key or not secrets.compare_digest(key, API_KEY):
+            return JSONResponse({"detail": "thiếu hoặc sai X-API-Key"}, status_code=401)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -200,8 +219,14 @@ def _require_disk_space(duration_sec: float) -> None:
         raise HTTPException(
             507,
             f"Không đủ dung lượng đĩa: cần khoảng {needed // (1024 * 1024)} MB cho video này, "
-            f"còn trống {free // (1024 * 1024)} MB tại {WORK_DIR}",
+            f"còn trống {free // (1024 * 1024)} MB tại <workdir>",
         )
+
+
+def _safe_error(error: BaseException) -> str:
+    """Giữ lỗi hữu ích nhưng không làm lộ đường dẫn runtime nội bộ."""
+
+    return str(error).replace(str(WORK_DIR), "<workdir>")[:500]
 
 
 def _sweep_stale_job_dirs() -> None:
@@ -283,16 +308,21 @@ def preview(req: PreviewRequest):
             "Model đang tải, chưa nghe thử được — kiểm tra GET /api/health"
         )
         raise HTTPException(503, detail)
+    if not PREVIEW_LOCK.acquire(blocking=False):
+        raise HTTPException(429, "Đang có một lượt nghe thử khác — thử lại sau")
     text = req.text.strip() or "Xin chào, đây là giọng đọc thử."
     preview_dir = WORK_DIR / "_preview"
-    preview_dir.mkdir(exist_ok=True)
+    preview_dir.mkdir(mode=0o700, exist_ok=True)
+    preview_dir.chmod(0o700)
     out_path = preview_dir / f"{uuid.uuid4().hex[:12]}.wav"
     t0 = time.time()
     try:
-        ENGINE.synth(text, out_path, voice=req.voice)
+        _synth_with_timeout(text, out_path, req.voice, 1.0)
     except Exception as e:
         logger.exception("Nghe thử lỗi")
-        raise HTTPException(500, f"Tổng hợp giọng lỗi: {e}")
+        raise HTTPException(500, f"Tổng hợp giọng lỗi: {_safe_error(e)}")
+    finally:
+        PREVIEW_LOCK.release()
     logger.info("Nghe thử xong sau %.2fs — %d ký tự", time.time() - t0, len(text))
     return FileResponse(
         out_path,
@@ -320,14 +350,10 @@ def synthesize(req: SynthesizeRequest):
         raise HTTPException(422, "ID segment bị trùng")
     _evict_old_jobs()
     _require_disk_space(req.durationSec)
-    with JOBS_LOCK:
-        pending = sum(1 for job in JOBS.values() if job["status"] in ("queued", "running"))
-    if pending >= MAX_PENDING_JOBS:
-        raise HTTPException(429, f"Đang có {pending} job chờ — thử lại sau")
-
     job_id = uuid.uuid4().hex[:16]
     job_dir = WORK_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    job_dir.chmod(0o700)
     logger.info(
         "Nhận job %s — %d câu, video %.1fs",
         job_id,
@@ -336,6 +362,10 @@ def synthesize(req: SynthesizeRequest):
     )
 
     with JOBS_LOCK:
+        pending = sum(1 for job in JOBS.values() if job["status"] in ("queued", "running"))
+        if pending >= MAX_PENDING_JOBS:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise HTTPException(429, f"Đang có {pending} job chờ — thử lại sau")
         JOBS[job_id] = {
             "status": "queued",
             "progress": 0.0,
@@ -407,7 +437,6 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
 
     try:
         meta = []
-        t_synth_total = 0.0
         segment_by_id = {seg.id: seg for seg in req.segments}
         slots = audio_pipeline.available_slots(
             [{"id": s.id, "start": s.start, "end": s.end} for s in req.segments],
@@ -458,7 +487,6 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
                 window_wavs = []
                 for info, (position, fit_wav), t_synth in pool.map(synthesize_one, segments):
                     meta.append(info)
-                    t_synth_total += t_synth
                     done_segments += 1
                     window_wavs.append((
                         {"start": position["start"] - window["startSec"], "end": position["end"]},
@@ -525,14 +553,14 @@ def _run_job(job_id: str, job_dir: Path, req: SynthesizeRequest) -> None:
     except OSError as e:
         logger.exception("%s LỖI ĐĨA sau %s", tag, _fmt_dur(time.time() - t_job))
         shutil.rmtree(job_dir, ignore_errors=True)
-        detail = f"Lỗi ghi đĩa (có thể đã hết dung lượng tại {WORK_DIR}): {e}"
+        detail = f"Lỗi ghi đĩa (có thể đã hết dung lượng tại <workdir>): {_safe_error(e)}"
         with JOBS_LOCK:
             JOBS[job_id].update(status="error", error=detail, finishedAt=time.time())
     except Exception as e:
         logger.exception("%s LỖI sau %s", tag, _fmt_dur(time.time() - t_job))
         shutil.rmtree(job_dir, ignore_errors=True)
         with JOBS_LOCK:
-            JOBS[job_id].update(status="error", error=str(e), finishedAt=time.time())
+            JOBS[job_id].update(status="error", error=_safe_error(e), finishedAt=time.time())
 
 
 
@@ -546,7 +574,7 @@ def load_engine_background() -> None:
         logger.info("Engine sẵn sàng: %s | %d Hz", engine.name, audio_pipeline.SAMPLE_RATE)
     except Exception as e:
         logger.exception("Nạp engine TTS thất bại")
-        ENGINE_ERROR = str(e)
+        ENGINE_ERROR = _safe_error(e)
 
 
 def print_server_info(host: str, port: int) -> None:

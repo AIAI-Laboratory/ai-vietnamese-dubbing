@@ -6,6 +6,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const STORE = 'dubs';
   const DB_VERSION = 1;
   const MAX_RECORDS = 12;
+  const MAX_BYTES = 64 * 1024 * 1024;
 
   function openDb() {
     return new Promise((resolve, reject) => {
@@ -59,12 +60,20 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       const req = store.getAll();
       req.onsuccess = () => {
         const records = (req.result || []).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
-        for (const stale of records.slice(MAX_RECORDS)) store.delete(stale.key);
+        let bytes = 0;
+        records.forEach((record, index) => {
+          const windows = Array.isArray(record.windows) ? record.windows : [];
+          const audio = [record.audioBase64, ...windows.map((window) => window.base64)]
+            .filter(Boolean)
+            .reduce((sum, value) => sum + Math.floor(value.length * 0.75), 0);
+          bytes += audio;
+          if (index >= MAX_RECORDS || bytes > MAX_BYTES) store.delete(record.key);
+        });
       };
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
   }
 
-  DUB.cache = { get, put, MAX_RECORDS };
+  DUB.cache = { get, put, MAX_RECORDS, MAX_BYTES };
 })();

@@ -25,7 +25,7 @@
     voice: "",
     supportedSites: { coursera: true, youtube: true },
     viSyllablesPerSec: 3.8,
-    planVersion: "vieneu-nano-v1",
+    planVersion: DUB.config.planVersion,
   };
 
   const SUBTITLE_SIZE_PCT = { small: 0.032, medium: 0.042, large: 0.056 };
@@ -36,6 +36,7 @@
   let dockObserver = null;
   let dockRetryTimer = null;
   let audioWindows = [];
+  const receivedWindowPayloads = new Map();
   let activeWindow = null;
   let subtitleEl = null;
   let controlsEl = null;
@@ -44,6 +45,7 @@
   let currentPlan = null;
   let currentTranslated = null;
   let currentSubtitles = null;
+  let lastSubtitleKey = null;
   let syncTimer = null;
   let syncAbort = null;
   let mode = "dubbed";
@@ -54,6 +56,17 @@
   let heldForSynthesis = false;
   let duckTimer = null;
   const liveObjectUrls = new Set();
+
+  /** Player SPA có thể thay video hoặc để lại UI khi extension được reload. */
+  function clearStaleInjectedUi() {
+    document.querySelectorAll(".ldub-overlay, .ldub-btn, .ldub-subtitle, .ldub-audio")
+      .forEach((el) => {
+        try { el.pause?.(); } catch (e) { /* phần tử cũ có thể không còn sống */ }
+        el.remove();
+      });
+  }
+
+  clearStaleInjectedUi();
 
   /** Người xem tự bấm play trong lúc chờ thì trả quyền điều khiển lại cho họ. */
   function releaseHold() {
@@ -190,6 +203,7 @@
     if (video) resetVideoVolume();
     currentState = "idle";
     currentPlan = currentTranslated = currentSubtitles = null;
+    video = null;
   }
 
   function resetVideoVolume() {
@@ -251,6 +265,7 @@
 
     const v = findVideo();
     if (!v || v === video) return;
+    if (video) teardown();
     video = v;
     try {
       await loadSettings();
@@ -289,6 +304,7 @@
   }
 
   function injectOverlay() {
+    if (overlay || dubBtn || subtitleEl) return;
     overlay = document.createElement("div");
     overlay.className = "ldub-overlay";
     overlay.innerHTML = `
@@ -578,6 +594,15 @@
       }
 
       const port = chrome.runtime.connect({ name: "dub-job" });
+      receivedWindowPayloads.clear();
+      port.onDisconnect.addListener(() => {
+        if (!jobRunning) return;
+        jobRunning = false;
+        currentState = "error";
+        setPanel(0, "Job đã dừng vì tab mất kết nối với extension.", true);
+        resumeVideoAfterSynthesis();
+        refreshStatus();
+      });
       port.onMessage.addListener((msg) => {
         if (msg.type === "PROGRESS") reportProgress(msg);
         else if (msg.type === "WINDOW") {
@@ -591,12 +616,14 @@
             refreshStatus();
           }
         } else if (msg.type === "DONE") {
+          const cachedWindows = [...receivedWindowPayloads.values()].sort((a, b) => a.index - b.index);
           DUB.cache
             .put(cacheKeyParts(videoId), {
               videoId,
               voice: settings.voice,
               planVersion: settings.planVersion,
               ...msg,
+              windows: cachedWindows.length ? cachedWindows : msg.windows,
             })
             .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
           reportTruncatedSentences(msg);
@@ -680,6 +707,7 @@
     currentPlan = msg.plan || currentPlan;
     currentTranslated = msg.translated || currentTranslated;
     currentSubtitles = msg.subtitles || currentSubtitles;
+    if (msg.window && msg.window.base64) receivedWindowPayloads.set(msg.window.index, msg.window);
     addWindow(msg.window);
     if (audioWindows.length === 1) finishSetup();
   }
@@ -915,6 +943,7 @@
     const showVi = settings.subtitlesOn && mode !== "original";
     const showEn = settings.subtitlesEnOn && mode !== "original";
     if ((!showVi && !showEn) || !currentSubtitles) {
+      lastSubtitleKey = "hidden";
       subtitleEl.hidden = true;
       return;
     }
@@ -923,9 +952,13 @@
     const vi = showVi && seg ? seg.vi : "";
     const en = showEn && seg ? seg.en : "";
     if (!vi && !en) {
+      lastSubtitleKey = "empty";
       subtitleEl.hidden = true;
       return;
     }
+    const key = `${seg.id}|${showVi ? vi : ""}|${showEn ? en : ""}`;
+    if (key === lastSubtitleKey) return;
+    lastSubtitleKey = key;
     subtitleEl.innerHTML = "";
     const box = document.createElement("span");
     box.className = "ldub-sub-box";
@@ -1015,6 +1048,8 @@
       previewAudioCache.set(voice, { base64: res.base64, mime: res.mime });
       playAndRelease(base64ToBlob(res.base64, res.mime || "audio/wav"));
       hint.textContent = "Đang phát...";
+    } catch (error) {
+      hint.textContent = "Lỗi nghe thử: " + (error.message || String(error));
     } finally {
       btn.disabled = false;
     }
@@ -1099,9 +1134,20 @@
     if (!currentPlan || !currentTranslated) return;
 
     setPanel(5, "Đang đổi giọng...", true);
+    jobRunning = true;
+    refreshStatus();
     holdVideoForSynthesis();
     const videoId = videoIdFromUrl();
     const port = chrome.runtime.connect({ name: "dub-job" });
+    receivedWindowPayloads.clear();
+    port.onDisconnect.addListener(() => {
+      if (!jobRunning) return;
+      jobRunning = false;
+      currentState = "error";
+      setPanel(0, "Job đổi giọng đã dừng vì tab mất kết nối.", true);
+      resumeVideoAfterSynthesis();
+      refreshStatus();
+    });
     let replaced = false;
     port.onMessage.addListener((msg) => {
       if (msg.type === "PROGRESS") reportProgress(msg);
@@ -1120,6 +1166,7 @@
         applyWindow(msg);
       } else if (msg.type === "DONE") {
         if (!replaced) finalizeFromDone(msg);
+        const cachedWindows = [...receivedWindowPayloads.values()].sort((a, b) => a.index - b.index);
         DUB.cache
           .put(cacheKeyParts(videoId, voice), {
             videoId,
@@ -1128,12 +1175,17 @@
             plan: msg.plan,
             translated: msg.translated,
             subtitles: msg.subtitles,
-            windows: msg.windows,
+            windows: cachedWindows.length ? cachedWindows : msg.windows,
           })
-          .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
+            .catch((error) => console.warn("[LDUB] không lưu được cache:", error));
+        jobRunning = false;
+        refreshStatus();
       } else if (msg.type === "ERROR") {
         setPanel(0, "Lỗi đổi giọng: " + msg.message, true);
+        jobRunning = false;
+        currentState = "error";
         resumeVideoAfterSynthesis();
+        refreshStatus();
       }
     });
     port.postMessage({

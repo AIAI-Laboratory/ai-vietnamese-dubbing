@@ -25,7 +25,7 @@ DUCK_RELEASE_SEC = 0.40
 
 STREAM_CHUNK_FRAMES = 1 << 16
 
-WINDOW_TARGET_SEC = 30.0
+WINDOW_TARGET_SEC = max(5.0, float(os.environ.get("WINDOW_TARGET_SEC", "15")))
 
 
 def _one_pole(tau_sec: float, fps: int) -> float:
@@ -65,9 +65,10 @@ def duck_envelope(wav_path: Path, fps: int = DUCK_FPS) -> dict | None:
 
 
 def plan_windows(segments: list[dict], duration_sec: float,
-                 target_sec: float = WINDOW_TARGET_SEC) -> list[dict]:
+                 target_sec: float | None = None) -> list[dict]:
     """Gom câu thành cửa sổ ~target_sec giây để phát dần."""
 
+    target_sec = WINDOW_TARGET_SEC if target_sec is None else target_sec
     ordered = sorted(segments, key=lambda seg: seg["start"])
     if not ordered:
         return []

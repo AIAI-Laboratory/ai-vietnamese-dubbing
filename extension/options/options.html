@@ -6,6 +6,8 @@
 <!-- External, không inline — CSP mặc định của MV3 (script-src 'self') chặn
      mọi <script> viết thẳng trong HTML, dù cùng gói extension. -->
 <script src="../lib/theme.js"></script>
+<link rel="stylesheet" href="../ui/tokens.css">
+<link rel="stylesheet" href="../ui/components.css">
 <link rel="stylesheet" href="options.css">
 </head>
 <body>
@@ -59,6 +61,7 @@
     <main class="content">
       <header class="content-head">
         <div>
+          <div class="content-brand"><img class="sd-logo" src="../icons/synthdub-logo.svg" alt=""><span><strong>SynthDub</strong><small>Local Vietnamese dubbing</small></span></div>
           <h1 id="contentTitle">Cài đặt</h1>
           <p id="contentSub" class="content-sub">Dịch, server giọng đọc và đồng bộ — tất cả trên một trang.</p>
         </div>
@@ -165,6 +168,7 @@
     </main>
   </div>
 
+  <script src="../lib/config.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

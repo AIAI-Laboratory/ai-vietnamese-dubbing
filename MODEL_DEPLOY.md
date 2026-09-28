@@ -8,6 +8,9 @@ server/models/vieneu-nano/
 
 The directory is ignored by Git because it contains runtime binaries.
 
+The downloader pins repository commit `aba295eb96a6fa6003ebe417cc1f2802a7adc1dc`
+and verifies SHA-256 before inference, so a clone always gets the same model.
+
 ## Download
 
 From the repository root:

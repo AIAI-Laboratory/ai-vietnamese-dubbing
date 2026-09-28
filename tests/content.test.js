@@ -153,7 +153,7 @@ function loadContentScript({ supportedSites } = {}) {
           postMessage(msg) { port.sent.push(msg); },
           sent: [],
           onMessage: { addListener(fn) { port.__deliver = fn; } },
-          onDisconnect: { addListener() {} },
+          onDisconnect: { addListener(fn) { port.__disconnect = fn; } },
         };
         ports.push(port);
         return port;
@@ -162,7 +162,7 @@ function loadContentScript({ supportedSites } = {}) {
   };
 
   vm.createContext(context);
-  for (const file of ['lib/vtt.js', 'lib/sites.js', 'lib/windows.js', 'lib/cache.js', 'content/content.js']) {
+  for (const file of ['lib/config.js', 'lib/vtt.js', 'lib/sites.js', 'lib/windows.js', 'lib/cache.js', 'content/content.js']) {
     vm.runInContext(fs.readFileSync(path.join(EXT, file), 'utf8'), context, { filename: file });
   }
   return { context, video, ports, created, body };
@@ -305,6 +305,16 @@ test('job lỗi hiện thông báo thay vì im lặng', async () => {
   await new Promise((r) => setTimeout(r, 10));
 
   assert.match(panelText(harness), /server tắt/);
+});
+
+test('worker mất kết nối thì content thoát loading và trả video về', async () => {
+  const harness = loadContentScript();
+  const port = await startJob(harness);
+  assert.strictEqual(harness.video.paused, true);
+  port.__disconnect();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(statusOf(harness), 'error');
+  assert.strictEqual(harness.video.paused, false);
 });
 
 test('tiến độ của phần còn lại không mở lại bảng khi đã phát được', async () => {

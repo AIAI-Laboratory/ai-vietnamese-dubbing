@@ -109,6 +109,23 @@ class RequestLimitTest(unittest.TestCase):
                 self.assertEqual(self.client.get(path, headers=KEY).status_code, 404)
 
 
+class PreviewSafetyTest(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(main.app)
+
+    def test_preview_rejects_when_another_preview_is_running(self):
+        main.ENGINE = object()
+        main.PREVIEW_LOCK.acquire()
+        try:
+            res = self.client.post(
+                "/api/preview", headers=KEY, json={"text": "xin chào", "voice": ""}
+            )
+        finally:
+            main.PREVIEW_LOCK.release()
+            main.ENGINE = None
+        self.assertEqual(res.status_code, 429)
+
+
 class JobLifecycleTest(unittest.TestCase):
     def setUp(self):
         main.JOBS.clear()

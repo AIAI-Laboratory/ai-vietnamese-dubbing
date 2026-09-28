@@ -18,6 +18,7 @@ Set a random `API_KEY` in `server/.env`, then download the model:
 
 ```bash
 uv run python scripts/download_vieneu_model.py
+chmod 600 server/.env
 ```
 
 ## Run
@@ -50,6 +51,9 @@ WantedBy=multi-user.target
 ```
 
 The extension needs the HTTPS server URL and the same `API_KEY` in its Options.
+Remote HTTP URLs are rejected by the extension; plain HTTP is only allowed for
+loopback (`127.0.0.1`, `localhost`, `::1`). Leave `CORS_ORIGINS` empty unless a
+trusted browser origin must call the API directly.
 
 ## Model files
 

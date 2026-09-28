@@ -25,6 +25,7 @@
         "https://www.youtube.com/*"
       ],
       "js": [
+        "lib/config.js",
         "lib/vtt.js",
         "lib/sites.js",
         "lib/windows.js",
@@ -32,6 +33,7 @@
         "content/content.js"
       ],
       "css": [
+        "ui/tokens.css",
         "content/content.css"
       ],
       "run_at": "document_idle"

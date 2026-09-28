@@ -99,12 +99,14 @@ The server settings are in `server/.env`:
 | `VIENEU_VOICE` | `Adam` | Default voice |
 | `VIENEU_STEPS` | `16` | Quality/speed trade-off |
 | `VIENEU_CFG` | `3.0` | VieNeu guidance value |
-| `SYNTH_WORKERS` | `3` | Parallel sentence workers |
+| `SYNTH_WORKERS` | `2` | Parallel sentence workers |
+| `WINDOW_TARGET_SEC` | `15` | Audio window target in seconds |
 | `ORT_THREADS` | unset | ONNX Runtime thread limit |
 | `JOB_RETENTION_MIN` | `60` | Finished-job retention |
 | `MAX_PENDING_JOBS` | `4` | Queue limit |
 | `MAX_BODY_MB` | `16` | Request body limit |
 | `ENABLE_DOCS` | `0` | Swagger/OpenAPI routes |
+| `CORS_ORIGINS` | empty | Optional comma-separated trusted origins |
 
 The extension stores Gemini, server, voice and page settings in Chrome storage.
 The popup stores volume and subtitle settings when you click **Save changes**.
@@ -133,7 +135,7 @@ uv run python -m unittest discover -s tests -t tests
 uv pip check
 ```
 
-Current suite: 50 JavaScript tests and 49 Python tests.
+Current suite: 54 JavaScript tests and 52 Python tests.
 
 ## Limits
 

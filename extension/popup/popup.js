@@ -150,8 +150,13 @@ const SUPPORTED_PAGE_RE = /^https:\/\/(www\.coursera\.org\/learn\/|www\.youtube\
 
 async function onClearCache() {
   const status = $('cacheStatus');
+  const glossary = await chrome.runtime.sendMessage({ type: 'CLEAR_GLOSSARY_CACHE' })
+    .catch(() => ({ ok: false }));
   const tabs = await chrome.tabs.query({ url: SUPPORTED_TAB_URLS });
-  if (!tabs.length) { setStatus(status, 'Mở một tab Coursera hoặc YouTube rồi thử lại (cache lưu theo trang).', false); return; }
+  if (!tabs.length) {
+    setStatus(status, glossary.ok ? 'Đã xoá glossary; mở tab video để xoá audio cache.' : 'Không xoá được cache.', glossary.ok);
+    return;
+  }
   let cleared = 0;
   for (const tab of tabs) {
     try {
@@ -167,7 +172,7 @@ async function onClearCache() {
       cleared++;
     } catch (e) { /* tab có thể không cho inject (chrome://, extension page...) — bỏ qua */ }
   }
-  setStatus(status, `Đã xoá cache trên ${cleared}/${tabs.length} tab đang mở.`, cleared > 0);
+  setStatus(status, `Đã xoá cache trên ${cleared}/${tabs.length} tab và glossary.`, cleared > 0 && glossary.ok);
 }
 $('btnClearCache').addEventListener('click', onClearCache);
 
