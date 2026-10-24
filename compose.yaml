@@ -1,0 +1,23 @@
+services:
+  tts:
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - server/.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 18765
+      VIENEU_MODEL_DIR: /app/server/models/vieneu-nano
+    ports:
+      - "127.0.0.1:18765:18765"
+    volumes:
+      - vieneu-models:/app/server/models
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  vieneu-models:
