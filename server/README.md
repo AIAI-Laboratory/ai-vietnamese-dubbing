@@ -14,7 +14,30 @@ uv run python scripts/download_vieneu_model.py
 
 Put a random value in `API_KEY` inside `server/.env`.
 
-## Run
+## Run with Docker Compose
+
+```bash
+cp server/.env.example server/.env   # đặt API_KEY trước
+docker compose build                 # lần đầu: build image
+docker compose run --rm tts python scripts/download_vieneu_model.py
+docker compose up -d
+```
+
+- Service auto-restarts on boot (`restart: unless-stopped`); `docker.service`
+  phải được `systemctl enable`.
+- Port được publish chỉ trên loopback: `127.0.0.1:18765`.
+- Model nằm trong volume `vieneu-models`, tải một lần bằng lệnh trên; container
+  bind `HOST=0.0.0.0` bên trong, `server/.env` cung cấp `API_KEY`.
+
+Kiểm tra:
+
+```bash
+curl -H "X-API-Key: your-server-key" http://127.0.0.1:18765/api/health
+```
+
+Cần thấy `"status":"ready"`. Không có key thì server trả 401.
+
+## Run (không Docker)
 
 ```bash
 uv run python server/main.py
