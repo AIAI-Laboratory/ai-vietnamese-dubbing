@@ -1,0 +1,12 @@
+.git
+.env
+**/.env
+.venv
+**/.venv
+server/models/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+node_modules/
+extension/
+tests/
