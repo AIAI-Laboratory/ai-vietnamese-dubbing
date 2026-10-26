@@ -129,12 +129,12 @@ uv run python -m unittest discover -s tests -t tests
 uv pip check
 ```
 
-Hiện có 50 test JavaScript và 49 test Python.
-
 ## Giới hạn
 
-- Chỉ có adapter Coursera và YouTube.
-- Timestamp transcript YouTube kém chính xác hơn WebVTT của Coursera.
+- Transcript dài hoặc thiếu dấu câu được tách thành các đoạn tối đa 300 ký tự, giữ lại timestamp tương ứng.
+- Gemini dịch theo lô giới hạn đồng thời số câu, kích thước input và output token; phản hồi bị cắt sẽ chỉ dịch lại bằng cách chia nhỏ lô lỗi.
+- Chỉ gửi câu có số liệu, phủ định, điều kiện, thuật ngữ hoặc bản dịch quá dài qua bước review để giảm token.
+- Chỉ có adapter Coursera và YouTube; timestamp YouTube kém chính xác hơn WebVTT của Coursera.
 - Mỗi job dùng một giọng.
 - Job lưu trong RAM và mất khi server dừng.
 - Máy mới phải tải model một lần.

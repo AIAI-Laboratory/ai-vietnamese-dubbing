@@ -7,6 +7,7 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   const BORROW_GAP_SEC = 0.08;
   const ROOMY_RATIO = 0.75;
   const DEFAULT_RATE = 3.8;
+  const MAX_SENTENCE_CHARS = 300;
   const RATE_MIN = 2.0;
   const RATE_MAX = 6.0;
   const RATE_ALPHA = 0.3;
@@ -26,6 +27,33 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
   }
 
   const countEnWords = (s) => (String(s).match(/[A-Za-z][A-Za-z'-]*/g) || []).length;
+  /** Tách transcript dài tại ranh giới cụm từ; ký tự dấu câu luôn ở lại cùng câu trước. */
+  function splitTextRange(flat, start, end) {
+    const ranges = [];
+    let cursor = start;
+    while (end - cursor > MAX_SENTENCE_CHARS) {
+      const limit = cursor + MAX_SENTENCE_CHARS;
+      let boundary = -1;
+      for (const mark of [',', ';', ':', '—', '–']) {
+        boundary = Math.max(boundary, flat.lastIndexOf(mark, limit - 1) + 1);
+      }
+      if (boundary < cursor + MAX_SENTENCE_CHARS * 0.65) {
+        boundary = flat.lastIndexOf(' ', limit);
+      }
+      if (boundary <= cursor) boundary = limit;
+      while (boundary > cursor && /\\s/.test(flat[boundary - 1])) boundary--;
+      ranges.push([cursor, boundary]);
+      cursor = boundary;
+      while (cursor < end && /\\s/.test(flat[cursor])) cursor++;
+    }
+    if (cursor < end) ranges.push([cursor, end]);
+    return ranges;
+  }
+
+  function estimateChunkOutputTokens(segment) {
+    return Math.ceil((String(segment.en || '').length + String(segment.vi || '').length) / 2) + 25;
+  }
+
 
   /** Gộp cue (cắt theo dòng hiển thị) thành câu hoàn chỉnh, giữ ánh xạ vị trí ký tự -> mốc thời gian để câu bắt đầu giữa cue vẫn có timestamp hợp lý. */
   function cuesToSentences(cues) {
@@ -51,6 +79,23 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     }
 
     const sentences = [];
+    function appendRange(start, end) {
+      while (start < end && /\s/.test(flat[start])) start++;
+      while (end > start && /\s/.test(flat[end - 1])) end--;
+      for (const [partStart, partEnd] of splitTextRange(flat, start, end)) {
+        const text = flat.slice(partStart, partEnd).trim();
+        if (!text) continue;
+        const actualStart = partStart + (flat.slice(partStart, partEnd).length - flat.slice(partStart, partEnd).trimStart().length);
+        const actualEnd = actualStart + text.length - 1;
+        sentences.push({
+          text,
+          start: exactStartAt.has(actualStart) ? exactStartAt.get(actualStart) : charStart[actualStart],
+          end: exactEndAt.has(actualEnd) ? exactEndAt.get(actualEnd) : charEnd[actualEnd],
+          anchorExact: exactStartAt.has(actualStart),
+        });
+      }
+    }
+
     const re = /[^.!?]*[.!?]+["')\]]*(?:\s+|$)/g;
     let m;
     let lastEnd = 0;
@@ -58,28 +103,12 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
       const raw = m[0];
       const text = raw.trim();
       if (!text) continue;
-      const s = m.index + (raw.length - raw.trimStart().length);
-      const e = s + text.length - 1;
+      const start = m.index + (raw.length - raw.trimStart().length);
+      appendRange(start, start + text.length);
       lastEnd = m.index + raw.length;
-      sentences.push({
-        text,
-        start: exactStartAt.has(s) ? exactStartAt.get(s) : charStart[s],
-        end: exactEndAt.has(e) ? exactEndAt.get(e) : charEnd[e],
-        anchorExact: exactStartAt.has(s),
-      });
     }
 
-    const tailRaw = flat.slice(lastEnd);
-    const tail = tailRaw.trim();
-    if (tail) {
-      const s = lastEnd + (tailRaw.length - tailRaw.trimStart().length);
-      sentences.push({
-        text: tail,
-        start: exactStartAt.has(s) ? exactStartAt.get(s) : charStart[s],
-        end: charEnd[charEnd.length - 1],
-        anchorExact: exactStartAt.has(s),
-      });
-    }
+    appendRange(lastEnd, flat.length);
     return sentences;
   }
 
@@ -88,25 +117,43 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     const rate = opts.viSyllablesPerSec || DEFAULT_RATE;
     const stretchMax = opts.stretchMax || STRETCH_MAX;
 
-    const sentences = cuesToSentences(cues);
-    const segments = sentences.map((s, i) => {
-      const slot = +(s.end - s.start).toFixed(3);
-      const nextStart = i + 1 < sentences.length ? sentences[i + 1].start : duration;
-      const usable = Math.max(slot, nextStart - BORROW_GAP_SEC - s.start);
-      const max = Math.max(1, Math.floor(usable * rate * stretchMax));
-      const target = Math.round(slot * rate);
-      return {
-        id: i + 1,
-        start: +s.start.toFixed(3),
-        end: +s.end.toFixed(3),
-        slot,
-        usableSlot: +usable.toFixed(3),
-        anchorExact: s.anchorExact,
-        en: s.text,
-        enWords: countEnWords(s.text),
-        budget: { target, max },
-      };
-    });
+    const boundedCues = cues
+      .filter((cue) => (
+        Number.isFinite(cue.start)
+        && Number.isFinite(cue.end)
+        && cue.end > cue.start
+        && cue.start < duration
+        && cue.end > 0
+        && typeof cue.text === 'string'
+        && cue.text.length > 0
+      ))
+      .map((cue) => ({
+        ...cue,
+        start: Math.max(0, cue.start),
+        end: Math.min(duration, cue.end),
+      }));
+    const sentences = cuesToSentences(boundedCues);
+    const segments = sentences
+      .map((s, i) => {
+        const slot = +(s.end - s.start).toFixed(3);
+        const nextStart = i + 1 < sentences.length ? sentences[i + 1].start : duration;
+        const usable = Math.max(slot, nextStart - BORROW_GAP_SEC - s.start);
+        const max = Math.max(1, Math.floor(usable * rate * stretchMax));
+        const target = Math.round(slot * rate);
+        return {
+          id: i + 1,
+          start: Math.min(duration, +s.start.toFixed(3)),
+          end: Math.min(duration, +s.end.toFixed(3)),
+          slot,
+          usableSlot: +usable.toFixed(3),
+          anchorExact: s.anchorExact,
+          en: s.text,
+          enWords: countEnWords(s.text),
+          budget: { target, max },
+        };
+      })
+      .filter((segment) => segment.end > segment.start)
+      .map((segment, i) => ({ ...segment, id: i + 1 }));
 
     const totalSlot = +segments.reduce((a, g) => a + g.slot, 0).toFixed(2);
     return {
@@ -130,11 +177,35 @@ var DUB = globalThis.DUB || (globalThis.DUB = {});
     };
   }
 
-  /** Chia nhỏ segment thành từng chunk để gọi LLM (tránh output quá dài bị cắt). */
-  function chunkSegments(segments, chunkSize) {
-    chunkSize = chunkSize || 80;
+  /** Pack segments within independent input, output and row-count budgets. */
+  function chunkSegments(segments, limits) {
+    limits = limits || {};
+    const maxSegments = limits.maxSegments || 80;
+    const maxInputChars = limits.maxInputChars || Infinity;
+    const maxOutputTokens = limits.maxOutputTokens || Infinity;
     const chunks = [];
-    for (let i = 0; i < segments.length; i += chunkSize) chunks.push(segments.slice(i, i + chunkSize));
+    let current = [];
+    let inputChars = 0;
+    let outputTokens = 0;
+
+    for (const segment of segments) {
+      const chars = String(segment.en || '').length + String(segment.vi || '').length;
+      const tokens = estimateChunkOutputTokens(segment);
+      if (current.length && (
+        current.length >= maxSegments
+        || inputChars + chars > maxInputChars
+        || outputTokens + tokens > maxOutputTokens
+      )) {
+        chunks.push(current);
+        current = [];
+        inputChars = 0;
+        outputTokens = 0;
+      }
+      current.push(segment);
+      inputChars += chars;
+      outputTokens += tokens;
+    }
+    if (current.length) chunks.push(current);
     return chunks;
   }
 

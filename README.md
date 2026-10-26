@@ -135,12 +135,12 @@ uv run python -m unittest discover -s tests -t tests
 uv pip check
 ```
 
-Current suite: 54 JavaScript tests and 52 Python tests.
-
 ## Limits
 
-- Only Coursera and YouTube adapters are included.
-- YouTube transcript timestamps are less precise than Coursera WebVTT.
+- Long or unpunctuated transcripts are split into timed segments of at most 300 source characters.
+- Gemini translation batches are bounded by row count, input size and estimated output tokens; truncated responses retry only the failed batch at smaller sizes.
+- Review is limited to sentences with numbers, negation, conditions, glossary terms or overlong translations to avoid reviewing safe text unnecessarily.
+- Only Coursera and YouTube adapters are included; YouTube timestamps are less precise than Coursera WebVTT.
 - One voice is used for a job.
 - Jobs live in memory and are lost when the server stops.
 - A fresh machine must download the model once.

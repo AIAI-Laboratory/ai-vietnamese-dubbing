@@ -103,10 +103,61 @@ test('câu thiếu bản dịch bị đánh dấu THIẾU chứ không lọt qua
 
 test('chunkSegments chia đủ và không mất câu nào', () => {
   const segments = Array.from({ length: 57 }, (_, i) => ({ id: i + 1 }));
-  const chunks = plan.chunkSegments(segments, 25);
+  const chunks = plan.chunkSegments(segments, { maxSegments: 25 });
   assert.deepStrictEqual(JSON.parse(JSON.stringify(chunks.map((c) => c.length))), [25, 25, 7]);
   assert.strictEqual(chunks.flat().length, segments.length);
   assert.strictEqual(new Set(chunks.flat().map((s) => s.id)).size, segments.length);
+});
+
+test('chunkSegments tôn trọng ngân sách đầu vào mà không làm mất thứ tự', () => {
+  const segments = Array.from({ length: 7 }, (_, i) => ({
+    id: i + 1,
+    en: 'x'.repeat(150),
+  }));
+  const chunks = plan.chunkSegments(segments, {
+    maxSegments: 25,
+    maxInputChars: 400,
+    maxOutputTokens: 8192,
+  });
+
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(chunks.map((chunk) => chunk.map((segment) => segment.id)))),
+    [[1, 2], [3, 4], [5, 6], [7]],
+  );
+});
+
+test('câu liên tục không dấu câu được tách mà vẫn giữ text và timestamp trong video 1 giờ', () => {
+  const text = Array.from({ length: 140 }, (_, i) => `word${i}`).join(' ');
+  const duration = 3600;
+  const built = plan.buildPlan([cue(0, duration, text)], duration);
+
+  assert.ok(built.segments.length > 1);
+  assert.ok(built.segments.every((segment) => segment.en.length <= 300));
+  assert.strictEqual(
+    built.segments.map((segment) => segment.en).join(' ').replace(/\\s+/g, ' ').trim(),
+    text,
+  );
+  assert.strictEqual(built.segments[0].start, 0);
+  assert.strictEqual(built.segments.at(-1).end, duration);
+  assert.ok(built.segments.every(({ start, end }) => start >= 0 && start < end && end <= duration));
+});
+
+test('clip subtitle cues to video duration for long videos', () => {
+  for (const duration of [1800, 3600]) {
+    const built = plan.buildPlan(
+      [
+        cue(duration - 2, duration + 0.4, 'Final sentence.'),
+        cue(duration + 1, duration + 2, 'Caption after the video.'),
+      ],
+      duration,
+    );
+
+    assert.deepStrictEqual(
+      JSON.parse(JSON.stringify(built.segments.map(({ start, end }) => ({ start, end })))),
+      [{ start: duration - 2, end: duration }],
+    );
+    assert.ok(built.segments.every(({ start, end }) => start >= 0 && start < end && end <= duration));
+  }
 });
 
 test('glossary hợp lệ đi qua, mọi biến thể rỗng bị chặn', () => {

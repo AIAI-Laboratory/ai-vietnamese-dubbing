@@ -2,7 +2,7 @@
 
 const DEFAULTS = {
   geminiApiKey: "",
-  timeoutMs: 30000,
+  timeoutMs: 120000,
 
   serverUrl: "http://127.0.0.1:18765",
   serverApiKey: "",

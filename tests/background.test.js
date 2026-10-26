@@ -8,13 +8,13 @@ const vm = require('node:vm');
 const EXT = path.join(__dirname, '..', 'extension');
 
 /** Phản hồi Gemini */
-function geminiReply(payload) {
+function geminiReply(payload, finishReason = 'STOP') {
   return {
     ok: true,
     status: 200,
     headers: { get: () => 'application/json' },
     text: async () => JSON.stringify({
-      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(payload) }] } }],
+      candidates: [{ finishReason, content: { parts: [{ text: typeof payload === 'string' ? payload : JSON.stringify(payload) }] } }],
     }),
   };
 }
@@ -39,7 +39,7 @@ function audioReply(bytes = 32) {
 }
 
 /** Dựng môi trường service worker giả và nạp background.js vào đó. */
-function loadWorker({ jobStates, audioWindows, geminiDelayMs = 0 }) {
+function loadWorker({ jobStates, audioWindows, geminiDelayMs = 0, geminiHandler }) {
   const calls = [];
   const context = {
     console,
@@ -69,12 +69,18 @@ function loadWorker({ jobStates, audioWindows, geminiDelayMs = 0 }) {
 
   let pollCount = 0;
   context.fetch = async (url, options = {}) => {
-    calls.push({ url, method: options.method || 'GET', headers: options.headers || {} });
+    const call = { url, method: options.method || 'GET', headers: options.headers || {} };
+    if (url.includes('generativelanguage')) call.body = options.body;
+    calls.push(call);
     if (url.includes('generativelanguage')) {
       if (geminiDelayMs) await new Promise((resolve) => setTimeout(resolve, geminiDelayMs));
       const body = JSON.parse(options.body);
       const prompt = body.contents[0].parts[0].text;
       const ids = [...prompt.matchAll(/^(\d+)\t/gm)].map((m) => Number(m[1]));
+      if (geminiHandler) {
+        const response = await geminiHandler({ body, prompt, ids });
+        if (response) return response;
+      }
       if (!ids.length) {
         return geminiReply({
           subject: 'Tin học',
@@ -216,7 +222,7 @@ test('mọi lớp dùng chung một planVersion', async () => {
   worker.context.__onMessage({ type: 'GET_CONTENT_SETTINGS' }, {}, (value) => { response = value; });
   for (let i = 0; i < 20 && !response; i++) await new Promise((resolve) => setTimeout(resolve, 2));
   assert.strictEqual(response.ok, true);
-  assert.strictEqual(response.settings.planVersion, 'vieneu-nano-v1');
+  assert.strictEqual(response.settings.planVersion, 'vieneu-nano-v2');
 });
 
 test('job lỗi phía server báo ERROR chứ không im lặng', async () => {
@@ -332,4 +338,111 @@ test('không gọi TTS qua HTTP tới máy từ xa', async () => {
   assert.strictEqual(response.ok, false);
   assert.match(response.error, /HTTPS/);
   assert.strictEqual(worker.calls.length, 0);
+});
+test('nâng timeout Gemini 30 giây đã lưu lên 120 giây', async () => {
+  const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
+  worker.context.chrome.storage.local._data.settings.timeoutMs = 30000;
+
+  const settings = await worker.context.loadSettings();
+
+  assert.strictEqual(settings.timeoutMs, 120000);
+  assert.strictEqual(worker.context.chrome.storage.local._data.settings.timeoutMs, 120000);
+});
+
+test('MAX_TOKENS dịch tự chia lại chunk lỗi thay vì làm hỏng toàn bộ bài', async () => {
+  let returnedTruncation = false;
+  const worker = loadWorker({
+    jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }],
+    geminiHandler: ({ prompt, ids }) => {
+      if (prompt.startsWith('CÂU CẦN DỊCH') && ids.length > 1 && !returnedTruncation) {
+        returnedTruncation = true;
+        return geminiReply('{', 'MAX_TOKENS');
+      }
+      return null;
+    },
+  });
+  const cues = [
+    { start: 0, end: 3, text: 'Sentence alpha is ordinary.' },
+    { start: 3, end: 6, text: 'Sentence beta is ordinary.' },
+    { start: 6, end: 9, text: 'Sentence gamma is ordinary.' },
+    { start: 9, end: 12, text: 'Sentence delta is ordinary.' },
+  ];
+  const { received } = await runJob(worker, cues, 20);
+
+  assert.strictEqual(returnedTruncation, true);
+  assert.ok(received.some((message) => message.type === 'DONE'));
+  assert.strictEqual(received.some((message) => message.type === 'ERROR'), false);
+  const translations = worker.calls
+    .filter((call) => call.url.includes('generativelanguage'))
+    .map((call) => JSON.parse(call.body).contents[0].parts[0].text)
+    .filter((prompt) => prompt.startsWith('CÂU CẦN DỊCH'));
+  assert.ok(translations.length > 1, 'chunk bị cắt phải được chia nhỏ để thử lại');
+  assert.strictEqual(received.find((message) => message.type === 'DONE').translated.length, 4);
+});
+
+test('MAX_TOKENS khi dịch bù chia riêng các câu còn thiếu', async () => {
+  let returnedPartial = false;
+  const worker = loadWorker({
+    jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }],
+    geminiHandler: ({ prompt, ids }) => {
+      if (!prompt.startsWith('CÂU CẦN DỊCH')) return null;
+      if (ids.length === 4 && !returnedPartial) {
+        returnedPartial = true;
+        return geminiReply({ segments: [{ id: ids[0], vi: 'câu số 1' }] });
+      }
+      if (ids.length === 3 && returnedPartial) return geminiReply('{', 'MAX_TOKENS');
+      return null;
+    },
+  });
+  const cues = [
+    { start: 0, end: 3, text: 'Sentence alpha is ordinary.' },
+    { start: 3, end: 6, text: 'Sentence beta is ordinary.' },
+    { start: 6, end: 9, text: 'Sentence gamma is ordinary.' },
+    { start: 9, end: 12, text: 'Sentence delta is ordinary.' },
+  ];
+  const { received } = await runJob(worker, cues, 20);
+
+  assert.ok(received.some((message) => message.type === 'DONE'));
+  assert.strictEqual(received.some((message) => message.type === 'ERROR'), false);
+  assert.strictEqual(received.find((message) => message.type === 'DONE').translated.length, 4);
+});
+
+test('review chỉ gửi các câu có số, phủ định hoặc điều kiện', async () => {
+  const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
+  const cues = [
+    { start: 0, end: 5, text: 'The value is 42.' },
+    { start: 5, end: 10, text: 'We do not use this method.' },
+    { start: 10, end: 15, text: 'It works well.' },
+  ];
+  const { received } = await runJob(worker, cues, 20);
+  assert.ok(received.some((message) => message.type === 'DONE'));
+  const reviewPrompts = worker.calls
+    .filter((call) => call.url.includes('generativelanguage'))
+    .map((call) => JSON.parse(call.body).contents[0].parts[0].text)
+    .filter((prompt) => prompt.startsWith('CÂU CẦN KIỂM ĐỊNH:'));
+
+  assert.strictEqual(reviewPrompts.length, 1);
+  assert.deepStrictEqual(
+    [...reviewPrompts[0].matchAll(/^(\d+)\t/gm)].map((match) => Number(match[1])),
+    [1, 2],
+  );
+});
+
+test('bản dịch vượt giới hạn TTS bị chặn trước khi gửi request', async () => {
+  const worker = loadWorker({ jobStates: [{ status: 'done', progress: 1, windows: WINDOWS }] });
+  const plan = {
+    videoDuration: 10,
+    segments: [{ id: 1, start: 0, end: 10 }],
+  };
+  const translated = [{ id: 1, vi: 'x'.repeat(2001) }];
+
+  await assert.rejects(
+    worker.context.ttsSynthesize(plan, translated, {
+      serverUrl: 'http://127.0.0.1:18765',
+      serverApiKey: 'server-key',
+      voice: '',
+    }),
+    /2000/,
+  );
+  assert.strictEqual(worker.calls.some((call) => call.url.endsWith('/api/synthesize')), false);
 });

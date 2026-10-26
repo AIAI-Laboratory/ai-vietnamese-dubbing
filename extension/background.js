@@ -5,7 +5,7 @@ const PLAN_VERSION = DUB.config.planVersion;
 
 const DEFAULT_SETTINGS = {
   geminiApiKey: '',
-  timeoutMs: 30000,
+  timeoutMs: 120000,
 
   serverUrl: 'http://127.0.0.1:18765',
   serverApiKey: '',
@@ -27,7 +27,10 @@ const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 const TRANSLATE_MAX_TOKENS = 8192;
 const TRANSLATE_CHUNK_SIZE = 25;
+const TRANSLATE_CHUNK_INPUT_CHARS = 12000;
+const TRANSLATE_CHUNK_OUTPUT_TOKENS = 6300;
 const TRANSLATE_CONCURRENCY = 1;
+const TTS_MAX_SEGMENT_CHARS = 2000;
 let apiCooldownUntil = 0;
 
 /** Log vào console của service worker */
@@ -38,10 +41,10 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 const JSON_ROW_OVERHEAD_TOKENS = 25;
 const PROMPT_TAIL_TOKENS = 200;
 
-/** Trần cho bước DỊCH */
+/** Trần cho bước DỊCH, ước lượng theo kích thước nội dung thực. */
 function outputTokenBudget(rows, floor = 600) {
-  const syllables = rows.reduce((sum, row) => sum + Number(row.budget && row.budget.max || row.max || 0), 0);
-  const estimate = syllables * 3 + rows.length * JSON_ROW_OVERHEAD_TOKENS + PROMPT_TAIL_TOKENS;
+  const characters = rows.reduce((sum, row) => sum + String(row.en || '').length, 0);
+  const estimate = Math.ceil(characters / 2) + rows.length * JSON_ROW_OVERHEAD_TOKENS + PROMPT_TAIL_TOKENS;
   return Math.min(TRANSLATE_MAX_TOKENS, Math.max(floor, estimate));
 }
 
@@ -92,6 +95,11 @@ async function loadSettings() {
     delete settings.model;
     delete settings.reviewModel;
     delete settings.sendSystemRole;
+    changed = true;
+  }
+  // 30s từng là mặc định của Gemini request; batch 25 câu có thể vượt ngưỡng đó.
+  if (settings.timeoutMs === 30000) {
+    settings.timeoutMs = DEFAULT_SETTINGS.timeoutMs;
     changed = true;
   }
   if (changed) await chrome.storage.local.set({ settings });
@@ -196,6 +204,11 @@ async function chatComplete({ geminiApiKey, timeoutMs, shouldContinue }, systemP
       if (finishReason && finishReason !== 'STOP') {
         console.warn(`[dub] Gemini dừng vì ${finishReason}` +
           (finishReason === 'MAX_TOKENS' ? ` — phản hồi bị cắt, trần đang là ${maxTokens} token` : ''));
+      }
+      if (finishReason === 'MAX_TOKENS') {
+        const error = new Error(`Gemini cắt phản hồi ở trần ${maxTokens} token`);
+        error.code = 'GEMINI_MAX_TOKENS';
+        throw error;
       }
       const content = geminiText(payload);
       if (typeof content !== 'string' || !content.length) {
@@ -319,6 +332,12 @@ async function fillMissingSentences(segments, parsed, settings, system, chunkNum
       );
       retry = DUB.plan.parseTranslationResponse(raw);
     } catch (error) {
+      if (error.code === 'GEMINI_MAX_TOKENS' && missing.length > 1) {
+        const recovered = await splitTranslateChunk(missing, settings, system, chunkNumber, error);
+        const wanted = new Set(missing.map((seg) => seg.id));
+        const recoveredRows = recovered.filter((row) => wanted.has(row.id) && row.vi && row.vi.trim());
+        return filled.concat(recoveredRows);
+      }
       console.warn(`[dub] chunk ${chunkNumber} dịch lại lần ${attempt} lỗi:`, error);
       continue;
     }
@@ -329,24 +348,53 @@ async function fillMissingSentences(segments, parsed, settings, system, chunkNum
   return filled;
 }
 
+async function translateChunk(segments, settings, system, chunkNumber) {
+  const rows = segments.map((segment) => ({ ...segment, __rate: settings.viSyllablesPerSec }));
+  const user = DUB.plan.buildTranslateUserPrompt(rows);
+  let raw;
+  try {
+    raw = await chatComplete(settings, system, user, outputTokenBudget(rows, 600));
+  } catch (error) {
+    if (error.code !== 'GEMINI_MAX_TOKENS' || segments.length === 1) throw error;
+    return splitTranslateChunk(segments, settings, system, chunkNumber, error);
+  }
+
+  let parsed;
+  try {
+    parsed = DUB.plan.parseTranslationResponse(raw);
+  } catch (error) {
+    if (segments.length === 1) throw error;
+    return splitTranslateChunk(segments, settings, system, chunkNumber, error);
+  }
+  return fillMissingSentences(segments, parsed, settings, system, chunkNumber);
+}
+
+async function splitTranslateChunk(segments, settings, system, chunkNumber, error) {
+  const middle = Math.ceil(segments.length / 2);
+  console.warn(`[dub] chunk ${chunkNumber} phản hồi lỗi/cắt ngắn — chia ${segments.length} câu thành ${middle}+${segments.length - middle}:`, error.message);
+  const first = await translateChunk(segments.slice(0, middle), settings, system, chunkNumber);
+  const second = await translateChunk(segments.slice(middle), settings, system, chunkNumber);
+  return first.concat(second);
+}
+
 async function translatePlan(plan, settings, terminology, onProgress) {
   const system = DUB.plan.buildTranslateSystemPrompt(settings.viSyllablesPerSec, terminology);
-  const chunks = DUB.plan.chunkSegments(plan.segments, TRANSLATE_CHUNK_SIZE);
+  const chunks = DUB.plan.chunkSegments(plan.segments, {
+    maxSegments: TRANSLATE_CHUNK_SIZE,
+    maxInputChars: TRANSLATE_CHUNK_INPUT_CHARS,
+    maxOutputTokens: TRANSLATE_CHUNK_OUTPUT_TOKENS,
+  });
   const results = new Array(chunks.length);
   const workers = Math.min(TRANSLATE_CONCURRENCY, chunks.length);
   const t0 = Date.now();
   let cursor = 0;
   let doneCount = 0;
 
-  log(`dịch ${plan.segments.length} câu — ${chunks.length} chunk x ${TRANSLATE_CHUNK_SIZE} câu, ${workers} luồng song song`);
+  log(`dịch ${plan.segments.length} câu — ${chunks.length} chunk theo ngân sách ${TRANSLATE_CHUNK_SIZE} câu/${TRANSLATE_CHUNK_INPUT_CHARS} ký tự, ${workers} luồng song song`);
 
   async function worker() {
     for (let i = cursor++; i < chunks.length; i = cursor++) {
-      const segs = chunks[i].map((g) => ({ ...g, __rate: settings.viSyllablesPerSec }));
-      const user = DUB.plan.buildTranslateUserPrompt(segs);
-      const raw = await chatComplete(settings, system, user, outputTokenBudget(segs, 600));
-      let parsed = DUB.plan.parseTranslationResponse(raw);
-      parsed = await fillMissingSentences(chunks[i], parsed, settings, system, i + 1);
+      const parsed = await translateChunk(chunks[i], settings, system, i + 1);
       results[i] = parsed;
       doneCount += parsed.length;
       if (onProgress) onProgress(doneCount, plan.segments.length);
@@ -371,6 +419,20 @@ async function translatePlan(plan, settings, terminology, onProgress) {
   return all;
 }
 
+function translationNeedsReview(row, source, terminology) {
+  const sourceText = String(source.en || '');
+  const translation = String(row.vi || '');
+  const semanticRisk = /\b(?:not|never|no|none|neither|nor|without|unless|except|only|if|whether|provided\s+that|assuming|must|shall|should|cannot|can['’]t|could|may|might|would)\b/i.test(sourceText);
+  const numericRisk = /(?:\d|[%$€£])/u.test(sourceText);
+  const termRisk = (terminology.terms || []).some((term) => (
+    term.source && sourceText.toLocaleLowerCase('en').includes(term.source.toLocaleLowerCase('en'))
+  ));
+  const overlong = translation.length > 500
+    || translation.length > Math.max(180, sourceText.length * 2)
+    || DUB.plan.countViSyllables(translation) > (source.budget && source.budget.max || Infinity);
+  return semanticRisk || numericRisk || termRisk || overlong;
+}
+
 async function reviewTranslations(plan, translated, settings, terminology, onProgress) {
   const sourceById = new Map(plan.segments.map((segment) => [segment.id, segment]));
   const rows = translated.map((segment) => ({
@@ -378,8 +440,16 @@ async function reviewTranslations(plan, translated, settings, terminology, onPro
     en: sourceById.get(segment.id).en,
     vi: segment.vi,
     max: sourceById.get(segment.id).budget.max,
-  }));
-  const chunks = DUB.plan.chunkSegments(rows, TRANSLATE_CHUNK_SIZE);
+  })).filter((row) => translationNeedsReview(row, sourceById.get(row.id), terminology));
+  if (!rows.length) {
+    log(`review bỏ qua ${translated.length} câu: không có dấu hiệu rủi ro`);
+    return translated;
+  }
+  const chunks = DUB.plan.chunkSegments(rows, {
+    maxSegments: TRANSLATE_CHUNK_SIZE,
+    maxInputChars: TRANSLATE_CHUNK_INPUT_CHARS,
+    maxOutputTokens: TRANSLATE_CHUNK_OUTPUT_TOKENS,
+  });
   const reviewed = new Map();
   let cursor = 0;
   let done = 0;
@@ -409,6 +479,7 @@ async function reviewTranslations(plan, translated, settings, terminology, onPro
     reviewed.has(segment.id) ? { ...segment, vi: reviewed.get(segment.id) } : segment
   ));
 }
+
 
 async function enforceKeptTerms(plan, translated, settings, terminology) {
   const keptTerms = (terminology.terms || []).filter((term) => term.action === 'keep');
@@ -574,6 +645,10 @@ async function previewVoice(serverUrl, apiKey, text, voice, timeoutMs) {
 }
 
 async function ttsSynthesize(plan, translated, settings) {
+  const oversized = translated.find((segment) => String(segment.vi || '').length > TTS_MAX_SEGMENT_CHARS);
+  if (oversized) {
+    throw new Error(`Bản dịch câu ${oversized.id} dài hơn giới hạn TTS ${TTS_MAX_SEGMENT_CHARS} ký tự; không gửi request để tránh HTTP 422`);
+  }
   const byId = new Map(translated.map((r) => [r.id, r.vi]));
   const segments = plan.segments.map((g) => ({ id: g.id, start: g.start, end: g.end, vi: byId.get(g.id) || '' }));
   const url = settings.serverUrl.replace(/\/+$/, '') + '/api/synthesize';
