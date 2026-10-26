@@ -340,11 +340,21 @@ def synthesize(req: SynthesizeRequest):
         raise HTTPException(503, detail)
     if any(not segment.vi.strip() for segment in req.segments):
         raise HTTPException(422, "Mọi segment phải có bản dịch tiếng Việt")
-    if any(
-        segment.end <= segment.start or segment.end > req.durationSec
-        for segment in req.segments
-    ):
-        raise HTTPException(422, "Timestamp segment không hợp lệ hoặc vượt thời lượng video")
+    invalid_timestamp = next(
+        (
+            segment for segment in req.segments
+            if segment.end <= segment.start or segment.end > req.durationSec
+        ),
+        None,
+    )
+    if invalid_timestamp:
+        detail = (
+            "Timestamp segment không hợp lệ hoặc vượt thời lượng video "
+            f"(id={invalid_timestamp.id}, start={invalid_timestamp.start:.3f}, "
+            f"end={invalid_timestamp.end:.3f}, durationSec={req.durationSec:.3f})"
+        )
+        logger.warning("Từ chối yêu cầu timestamp: %s", detail)
+        raise HTTPException(422, detail)
     ids = [segment.id for segment in req.segments]
     if len(ids) != len(set(ids)):
         raise HTTPException(422, "ID segment bị trùng")

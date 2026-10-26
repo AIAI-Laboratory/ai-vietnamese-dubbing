@@ -62,8 +62,11 @@ DELETE /api/job/{job_id}
 GET    /audio/{job_id}/w{index}.{ext}
 ```
 
-Limits include six-hour videos, 5000 segments, a 16 MB request body and four
-queued/running jobs. Jobs are kept in memory. Finished audio is removed after
+Requests support videos up to six hours, 5000 segments, a 16 MB body and four
+queued/running jobs. Subtitle cues extending past the video duration are clipped;
+cues starting at or after the end are discarded before synthesis. Long jobs are
+processed in short audio windows, but total CPU time grows with subtitle count
+and duration. Jobs are kept in memory; finished audio is removed after
 `JOB_RETENTION_MIN`.
 
 ## Tests

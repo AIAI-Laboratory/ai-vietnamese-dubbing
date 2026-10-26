@@ -148,6 +148,28 @@ class JobLifecycleTest(unittest.TestCase):
         self.assertEqual(res.status_code, 507)
         self.assertIn("dung lượng", res.json()["detail"])
 
+    def test_timestamp_rejection_identifies_segment_and_logs_bounds(self):
+        main.ENGINE = object()
+        try:
+            with self.assertLogs(main.logger, level="WARNING") as logs:
+                res = self.client.post(
+                    "/api/synthesize",
+                    headers=KEY,
+                    json={
+                        **JOB_BODY,
+                        "segments": [
+                            {"id": 7, "start": 9.0, "end": 10.25, "vi": "xin chào"}
+                        ],
+                    },
+                )
+        finally:
+            main.ENGINE = None
+
+        self.assertEqual(res.status_code, 422)
+        self.assertIn("id=7", res.json()["detail"])
+        self.assertIn("durationSec=10.000", res.json()["detail"])
+        self.assertTrue(any("id=7" in message for message in logs.output))
+
     def test_rejects_jobs_while_the_engine_is_unavailable(self):
         self.assertIsNone(main.ENGINE)
         self.assertEqual(
